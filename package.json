@@ -1,16 +1,44 @@
 {
-	"name": "my-mcp",
-	"version": "0.0.0",
-	"private": true,
-	"scripts": {
-		"deploy": "wrangler deploy",
-		"dev": "wrangler dev",
-		"start": "wrangler dev",
-		"test": "vitest"
+	"name": "draw-things-mcp-cursor",
+	"version": "1.1.4",
+	"description": "Draw Things API integration for Cursor using Model Context Protocol (MCP)",
+	"private": false,
+	"type": "module",
+	"main": "src/index.js",
+	"bin": {
+		"draw-things-mcp-cursor": "./src/cli.js"
 	},
-	"devDependencies": {
-		"@cloudflare/vitest-pool-workers": "^0.6.4",
-		"vitest": "~2.1.9",
-		"wrangler": "^3.109.3"
+	"scripts": {
+		"start": "node src/cli.js",
+		"dev": "node src/cli.js"
+	},
+	"dependencies": {
+		"axios": "^1.6.7",
+		"@modelcontextprotocol/sdk": "^1.6.0"
+	},
+	"files": [
+		"src",
+		"README.md"
+	],
+	"keywords": [
+		"cursor",
+		"mcp",
+		"draw-things",
+		"ai",
+		"image-generation",
+		"stable-diffusion"
+	],
+	"author": "James Jao",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/james-jao/draw-things-mcp"
+	},
+	"bugs": {
+		"url": "https://github.com/james-jao/draw-things-mcp/issues"
+	},
+	"homepage": "https://github.com/james-jao/draw-things-mcp#readme",
+	"engines": {
+		"node": ">=14.0.0"
 	}
 }
