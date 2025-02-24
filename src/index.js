@@ -15,7 +15,6 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { DrawThingsService } from './services/drawThings/drawThingsService.js';
-import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 
 class DrawThingsMcp {
 	constructor() {
@@ -29,101 +28,83 @@ class DrawThingsMcp {
 	}
 
 	setupTools() {
-		// Register available tools
-		this.server.setRequestHandler(ListToolsRequestSchema, async () => {
-			return {
-				tools: [
-					{
-						name: "generateImage",
-						description: "Generate an image using Draw Things API",
-						inputSchema: {
-							type: "object",
-							properties: {
-								prompt: {
-									type: "string",
-									description: "The prompt to generate the image from"
-								},
-								negative_prompt: {
-									type: "string",
-									description: "The negative prompt to avoid certain elements in the generated image"
-								},
-								width: {
-									type: "number",
-									description: "The width of the generated image"
-								},
-								height: {
-									type: "number",
-									description: "The height of the generated image"
-								},
-								model: {
-									type: "string",
-									description: "The model to use for generation"
-								},
-								steps: {
-									type: "number",
-									description: "Number of steps for generation"
-								}
-							},
-							required: ["prompt"]
-						}
+		// Register image generation tool
+		this.server.tool({
+			name: "generateImage",
+			description: "Generate an image using Draw Things API",
+			parameters: {
+				type: "object",
+				properties: {
+					prompt: {
+						type: "string",
+						description: "The prompt to generate the image from"
+					},
+					negative_prompt: {
+						type: "string",
+						description: "The negative prompt to avoid certain elements in the generated image"
+					},
+					width: {
+						type: "number",
+						description: "The width of the generated image"
+					},
+					height: {
+						type: "number",
+						description: "The height of the generated image"
+					},
+					model: {
+						type: "string",
+						description: "The model to use for generation"
+					},
+					steps: {
+						type: "number",
+						description: "Number of steps for generation"
 					}
-				]
-			};
-		});
-
-		// Set up tool handlers
-		this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
-			try {
-				if (!request.params.arguments) {
-					throw new Error("Arguments are required");
-				}
-
-				switch (request.params.name) {
-					case "generateImage": {
-						console.log('Received generateImage request with params:', request.params.arguments);
-						const result = await this.service.generateImage(request.params.arguments);
-						
-						if (result.status >= 400) {
-							console.error('Generation failed:', result.error);
-							return {
-								type: 'error',
-								error: result.error || 'Failed to generate image',
-								code: result.status
-							};
-						}
-
-						if (!result.images || result.images.length === 0) {
-							console.error('No images generated');
-							return {
-								type: 'error',
-								error: 'No images generated',
-								code: 500
-							};
-						}
-
-						console.log('Successfully generated image');
+				},
+				required: ["prompt"]
+			},
+			handler: async (params) => {
+				console.log('Received generateImage request with params:', params);
+				try {
+					const result = await this.service.generateImage(params);
+					
+					if (result.status >= 400) {
+						console.error('Generation failed:', result.error);
 						return {
-							type: 'success',
-							content: [{
-								type: 'image',
-								data: result.images[0],
-								mimeType: 'image/png'
-							}],
-							metadata: {
-								parameters: result.parameters
-							}
+							type: 'error',
+							error: result.error || 'Failed to generate image',
+							code: result.status
 						};
 					}
-					default:
-						throw new Error(`Unknown tool: ${request.params.name}`);
+
+					if (!result.images || result.images.length === 0) {
+						console.error('No images generated');
+						return {
+							type: 'error',
+							error: 'No images generated',
+							code: 500
+						};
+					}
+
+					console.log('Successfully generated image');
+					return {
+						type: 'success',
+						content: [{
+							type: 'image',
+							data: result.images[0],
+							mimeType: 'image/png'
+						}],
+						metadata: {
+							parameters: result.parameters
+						}
+					};
+				} catch (error) {
+					console.error('Error in generateImage handler:', error);
+					return {
+						type: 'error',
+						error: error.message || 'Internal server error',
+						code: 500
+					};
 				}
-			} catch (error) {
-				console.error('Error in generateImage handler:', error);
-				return {
-					type: 'error',
-					error: error.message || 'Internal server error',
-					code: 500
-				};
 			}
 		});
 	}
