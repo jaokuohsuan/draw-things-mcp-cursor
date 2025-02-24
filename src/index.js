@@ -29,7 +29,7 @@ class DrawThingsMcp {
 	}
 
 	setupTools() {
-		// 設定可用的工具列表
+		// Register available tools
 		this.server.setRequestHandler(ListToolsRequestSchema, async () => {
 			return {
 				tools: [
@@ -71,7 +71,7 @@ class DrawThingsMcp {
 			};
 		});
 
-		// 設定工具的處理邏輯
+		// Set up tool handlers
 		this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
 			try {
 				if (!request.params.arguments) {
@@ -131,7 +131,7 @@ class DrawThingsMcp {
 	async start() {
 		const transport = new StdioServerTransport();
 		
-		// 處理 SIGINT 信號 (Ctrl+C)
+		// Handle SIGINT signal (Ctrl+C)
 		process.on('SIGINT', async () => {
 			console.log('\nReceived SIGINT. Closing server...');
 			try {
