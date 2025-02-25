@@ -54,7 +54,7 @@ class DrawThingsService {
 
   async checkApiConnection() {
     try {
-      const response = await this.axios.get('/sdapi/v1/sd-models', { timeout: 5000 });
+      const response = await this.axios.get('/sdapi/v1/options', { timeout: 5000 });
       return response.status >= 200 && response.status < 300;
     } catch (error) {
       console.error('API connection check failed:', error.message);
