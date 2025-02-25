@@ -17,8 +17,10 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { DrawThingsService } from './services/drawThings/drawThingsService.js';
+import { ImageGenerationParamsSchema, McpResponseSchema } from './services/drawThings/schemas.js';
 import fs from 'fs';
 import path from 'path';
+import { z } from 'zod';
 
 // Helper function to save images to the file system
 async function saveImage(base64Data, outputPath) {
@@ -47,65 +49,60 @@ const server = new McpServer({
 // Create service instance
 const drawThingsService = new DrawThingsService();
 
-// Register image generation tool - using simplified syntax
+// Helper function to create error response
+function createErrorResponse(message) {
+	return McpResponseSchema.parse({
+		content: [{
+			type: 'text',
+			text: message
+		}],
+		isError: true
+	});
+}
+
+// Helper function to create image response
+function createImageResponse(imageData) {
+	return McpResponseSchema.parse({
+		content: [{
+			type: 'image',
+			data: imageData,
+			mimeType: 'image/png'
+		}]
+	});
+}
+
+// Register image generation tool with Zod validation
 server.tool(
 	"generateImage", 
 	"Generate an image using Draw Things API",
-	async (params, cb) => {
-		console.log('Received generateImage request with params:', params);
+	async (inputParams, context) => {
+		console.log('Received generateImage request with params:', inputParams);
 		try {
-			// Check if params is a valid object
-			if (!params || typeof params !== 'object') {
-				console.error('Invalid parameters');
-				return cb(null, {
-					content: [{
-						type: 'text',
-						text: 'Invalid parameters provided'
-					}],
-					isError: true
-				});
+			// Use Zod to validate parameters
+			const parseResult = ImageGenerationParamsSchema.safeParse(inputParams);
+			if (!parseResult.success) {
+				console.error('Parameter validation failed:', parseResult.error.format());
+				return createErrorResponse(`Invalid parameters: ${parseResult.error.message}`);
 			}
 
-			// Ensure prompt exists
-			if (!params.prompt) {
-				console.error('Missing prompt parameter');
-				return cb(null, {
-					content: [{
-						type: 'text',
-						text: 'Missing required parameter: prompt'
-					}],
-					isError: true
-				});
-			}
-
-			const result = await drawThingsService.generateImage(params);
+			// Pass validated parameters to the service
+			const result = await drawThingsService.generateImage(parseResult.data);
 			
 			if (result.status >= 400) {
 				console.error('Generation failed:', result.error);
-				return cb(null, {
-					content: [{
-						type: 'text',
-						text: result.error || 'Failed to generate image'
-					}],
-					isError: true
-				});
+				return createErrorResponse(result.error || 'Failed to generate image');
 			}
 
 			if (!result.images || result.images.length === 0) {
 				console.error('No images generated');
-				return cb(null, {
-					content: [{
-						type: 'text',
-						text: 'No images generated'
-					}],
-					isError: true
-				});
+				return createErrorResponse('No images generated');
 			}
 
 			// Save generated image to file
 			try {
 				const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-				const filename = `${params.prompt ? params.prompt.replace(/[^a-z0-9]/gi, '_').substring(0, 30) : 'image'}_${timestamp}.png`;
+				const prompt = result.parameters?.prompt || 'image';
+				const filename = `${prompt.replace(/[^a-z0-9]/gi, '_').substring(0, 30)}_${timestamp}.png`;
 				const outputPath = path.join('images', filename);
 				await saveImage(result.images[0], outputPath);
 				console.log(`Image saved to: ${outputPath}`);
@@ -115,22 +112,10 @@ server.tool(
 			}
 
 			console.log('Successfully generated image');
-			return cb(null, {
-				content: [{
-					type: 'image',
-					data: result.images[0],
-					mimeType: 'image/png'
-				}]
-			});
+			return createImageResponse(result.images[0]);
 		} catch (error) {
 			console.error('Error in generateImage handler:', error);
-			return cb(error, {
-				content: [{
-					type: 'text',
-					text: error.message || 'Internal server error'
-				}],
-				isError: true
-			});
+			return createErrorResponse(error.message || 'Internal server error');
 		}
 	}
 );
@@ -183,7 +168,21 @@ server.tool(
 						process.exit(0);
 					}
 
-					const params = JSON.parse(data);
+					// Parse and validate CLI input parameters
+					let params;
+					try {
+						const rawParams = JSON.parse(data);
+						const parseResult = ImageGenerationParamsSchema.safeParse(rawParams);
+						if (!parseResult.success) {
+							console.error('Invalid CLI parameters:', parseResult.error.format());
+							process.exit(1);
+						}
+						params = parseResult.data;
+					} catch (error) {
+						console.error('Failed to parse CLI input:', error.message);
+						process.exit(1);
+					}
+
 					console.log('CLI Mode: Received parameters:', params);
 					
 					const result = await drawThingsService.generateImage(params);
@@ -196,7 +195,7 @@ server.tool(
 
 					if (result.images && result.images.length > 0) {
 						const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-						const filename = `${params.prompt.replace(/[^a-z0-9]/gi, '_')}_${timestamp}.png`;
+						const filename = `${params.prompt?.replace(/[^a-z0-9]/gi, '_') || 'image'}_${timestamp}.png`;
 						const outputPath = path.join('images', filename);
 						await saveImage(result.images[0], outputPath);
 					}
