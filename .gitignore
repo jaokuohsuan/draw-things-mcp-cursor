@@ -174,3 +174,4 @@ dist
 images/
 .cursor
 test-output
+cursor-mcp-bridge.log
