@@ -97,7 +97,120 @@ function createImageResponse(imageData) {
 	};
 }
 
-// Send error response conforming to JSON-RPC 2.0
+// Used to track whether we have an active request
+let isProcessing = false;
+let exitDelayTimer = null;
+const EXIT_DELAY_MS = 3000; // 3 seconds waiting time after successful completion
+let isPipeMode = false; // Flag to indicate if running in pipe mode
+
+// Track processed request IDs to avoid duplicate processing
+const processedRequestIds = new Set();
+const processedPrompts = new Map(); // Track processed prompts with timestamps
+const REQUEST_HISTORY_LIMIT = 100; // Limit the size of our history to prevent memory leaks
+const PROMPT_HISTORY_EXPIRE_MS = 60000; // 60 seconds expiry for prompt history
+
+// Helper to prevent duplicate request processing
+function markRequestAsProcessed(requestId) {
+	// Add to processed set
+	processedRequestIds.add(requestId);
+	
+	// Keep set size limited
+	if (processedRequestIds.size > REQUEST_HISTORY_LIMIT) {
+		// Remove oldest entry (first item in the set)
+		const oldestId = processedRequestIds.values().next().value;
+		processedRequestIds.delete(oldestId);
+	}
+}
+
+function hasRequestBeenProcessed(requestId) {
+	return processedRequestIds.has(requestId);
+}
+
+// Helper to track and prevent duplicate prompt processing
+function isPromptDuplicate(promptContent) {
+	if (!promptContent) return false;
+	
+	// Clean up old entries first
+	const now = Date.now();
+	for (const [prompt, timestamp] of processedPrompts.entries()) {
+		if (now - timestamp > PROMPT_HISTORY_EXPIRE_MS) {
+			processedPrompts.delete(prompt);
+		}
+	}
+	
+	// Check if this prompt was recently processed
+	const normalizedPrompt = promptContent.trim().toLowerCase();
+	if (processedPrompts.has(normalizedPrompt)) {
+		log(`Duplicate prompt detected: "${normalizedPrompt.substring(0, 30)}..."`);
+		return true;
+	}
+	
+	// Add to processed prompts with current timestamp
+	processedPrompts.set(normalizedPrompt, now);
+	
+	// Keep map size limited
+	if (processedPrompts.size > REQUEST_HISTORY_LIMIT) {
+		// Remove oldest entry (first item in the map)
+		const oldestPrompt = processedPrompts.keys().next().value;
+		processedPrompts.delete(oldestPrompt);
+	}
+	
+	return false;
+}
+
+// Check if running in pipe mode (stdin/stdout is not a TTY)
+try {
+	isPipeMode = !process.stdin.isTTY || !process.stdout.isTTY;
+	if (process.env.DRAW_THINGS_FORCE_STAY_ALIVE === 'true') {
+		isPipeMode = true;
+	}
+	log(`Process running in ${isPipeMode ? 'pipe' : 'standalone'} mode`);
+} catch (e) {
+	// If we can't check TTY status, assume we might be in pipe mode
+	isPipeMode = true;
+	log('Unable to determine TTY status, assuming pipe mode');
+}
+
+// Function to signal completion of a task
+function processComplete(success) {
+	log(`Process complete. Success: ${success}`);
+	isProcessing = false;
+	
+	// Clear any existing timer
+	if (exitDelayTimer) {
+		clearTimeout(exitDelayTimer);
+		exitDelayTimer = null;
+	}
+	
+	// Only exit if not in pipe mode
+	if (!isPipeMode) {
+		// Set a timer to exit, giving time for any final operations to complete
+		exitDelayTimer = setTimeout(() => {
+			log('Exiting after successful completion (standalone mode)');
+			process.exit(0);
+		}, EXIT_DELAY_MS);
+	} else {
+		log('Completed processing request (pipe mode) - staying alive for additional requests');
+	}
+}
+
+// Gracefully handle errors when writing to stdout
+function safeWrite(data) {
+	try {
+		process.stdout.write(data + '\n');
+	} catch (error) {
+		// If we get EPIPE, the other end has closed the pipe
+		if (error.code === 'EPIPE') {
+			log('Pipe has been closed, exiting gracefully');
+			process.exit(0);
+		} else {
+			log(`Error writing to stdout: ${error.message}`);
+			// For other errors, don't exit but log the issue
+		}
+	}
+}
+
+// Send error response conforming to JSON-RPC 2.0 with safe write
 function sendErrorResponse(message, errorType = "invalid_request", code = -32600, id = "error-" + Date.now()) {
 	const errorResponse = {
 		jsonrpc: "2.0",
@@ -110,7 +223,7 @@ function sendErrorResponse(message, errorType = "invalid_request", code = -32600
 	};
 	
 	log(`Sending error response: ${JSON.stringify(errorResponse)}`);
-	process.stdout.write(JSON.stringify(errorResponse) + '\n');
+	safeWrite(JSON.stringify(errorResponse));
 }
 
 // Process request to ensure it has the correct JSON-RPC 2.0 structure
@@ -242,6 +355,21 @@ async function logError(error) {
 // Handle image generation request
 async function handleImageGeneration(parameters, requestId) {
 	try {
+		// Check if this request has already been processed
+		if (hasRequestBeenProcessed(requestId)) {
+			log(`Request ${requestId} has already been processed, skipping`);
+			return;
+		}
+		
+		// Check for duplicate prompt content
+		if (parameters && parameters.prompt && isPromptDuplicate(parameters.prompt)) {
+			log(`Duplicate prompt detected for request ${requestId}, skipping`);
+			return;
+		}
+		
+		// Mark as processed
+		markRequestAsProcessed(requestId);
+		
 		// Call image generation service
 		const result = await drawThingsService.generateImage(parameters || {});
 		
@@ -253,7 +381,10 @@ async function handleImageGeneration(parameters, requestId) {
 				id: requestId,
 				result: createErrorResponse(errorMessage)
 			};
-			process.stdout.write(JSON.stringify(response) + '\n');
+			safeWrite(JSON.stringify(response));
+			
+			// Signal that the request is complete with error
+			processComplete(false);
 		} else if (result.images && result.images.length > 0) {
 			// Save image to file system
 			try {
@@ -271,8 +402,11 @@ async function handleImageGeneration(parameters, requestId) {
 					result: createImageResponse(result.images[0])
 				};
 				log('Preparing to return MCP response with image data');
-				process.stdout.write(JSON.stringify(response) + '\n');
+				safeWrite(JSON.stringify(response));
 				log('MCP response sent');
+				
+				// Signal that the request is complete successfully
+				processComplete(true);
 			} catch (saveError) {
 				log(`Error saving image: ${saveError.message}`);
 				
@@ -282,7 +416,10 @@ async function handleImageGeneration(parameters, requestId) {
 					id: requestId,
 					result: createImageResponse(result.images[0])
 				};
-				process.stdout.write(JSON.stringify(response) + '\n');
+				safeWrite(JSON.stringify(response));
+				
+				// Signal that the request is complete with partial success
+				processComplete(true);
 			}
 		} else {
 			// No images
@@ -291,7 +428,10 @@ async function handleImageGeneration(parameters, requestId) {
 				id: requestId,
 				result: createErrorResponse('No images were generated')
 			};
-			process.stdout.write(JSON.stringify(response) + '\n');
+			safeWrite(JSON.stringify(response));
+			
+			// Signal that the request is complete with error
+			processComplete(false);
 		}
 	} catch (error) {
 		// Handle error
@@ -301,7 +441,10 @@ async function handleImageGeneration(parameters, requestId) {
 			id: requestId,
 			result: createErrorResponse(`Internal error: ${error.message}`)
 		};
-		process.stdout.write(JSON.stringify(response) + '\n');
+		safeWrite(JSON.stringify(response));
+		
+		// Signal that the request is complete with error
+		processComplete(false);
 	}
 }
 
@@ -325,6 +468,22 @@ async function main() {
 			}
 		});
 		
+		// Handle EPIPE specially
+		process.on('EPIPE', () => {
+			log('EPIPE signal received - pipe has been closed');
+			process.exit(0);
+		});
+		
+		// Handle broken pipe specifically
+		process.stdout.on('error', (err) => {
+			if (err.code === 'EPIPE') {
+				log('Broken pipe detected on stdout');
+				process.exit(0);
+			} else {
+				log(`stdout error: ${err.message}`);
+			}
+		});
+		
 		// Set up readline interface for line-by-line processing
 		const rl = readline.createInterface({
 			input: process.stdin,
@@ -337,6 +496,15 @@ async function main() {
 			if (!line || line.trim() === '') return;
 			
 			log(`Received line input: ${line.substring(0, 100)}${line.length > 100 ? '...' : ''}`);
+			
+			// Set processing flag to prevent early exit
+			isProcessing = true;
+			
+			// Clear any existing exit timer
+			if (exitDelayTimer) {
+				clearTimeout(exitDelayTimer);
+				exitDelayTimer = null;
+			}
 			
 			// Check if input is already in JSON format
 			try {
@@ -356,10 +524,13 @@ async function main() {
 						} else {
 							// Unsupported tool
 							sendErrorResponse(`Tool not found: ${tool}`, "method_not_found", -32601, jsonInput.id);
+							processComplete(false);
 						}
 					} else {
 						// Let the MCP SDK handle other methods
-						process.stdout.write(line + '\n');
+						safeWrite(line);
+						// For non-image generation methods, mark as complete immediately
+						processComplete(true);
 					}
 				} else {
 					log('JSON format is valid but does not conform to JSON-RPC 2.0 standard, converting');
@@ -370,8 +541,12 @@ async function main() {
 							processedRequest.params.tool === 'generateImage') {
 							handleImageGeneration(processedRequest.params.parameters, processedRequest.id);
 						} else {
-							process.stdout.write(JSON.stringify(processedRequest) + '\n');
+							safeWrite(JSON.stringify(processedRequest));
+							// For non-image generation methods, mark as complete immediately
+							processComplete(true);
 						}
+					} else {
+						processComplete(false);
 					}
 				}
 			} catch (e) {
@@ -380,6 +555,13 @@ async function main() {
 				// Check if it's a plain text prompt
 				if (line && typeof line === 'string' && !line.startsWith('{')) {
 					log('Detected plain text prompt, converting to JSON-RPC request');
+					
+					// Check for duplicate prompt content to prevent multiple processing
+					if (isPromptDuplicate(line.trim())) {
+						log(`Duplicate plain text prompt detected, skipping: "${line.trim().substring(0, 30)}..."`);
+						processComplete(false);
+						return;
+					}
 					
 					// Create request conforming to JSON-RPC 2.0 standard
 					const request = {
@@ -399,6 +581,7 @@ async function main() {
 				} else {
 					log('Unrecognized input format, cannot process');
 					sendErrorResponse('Unrecognized input format', "parse_error", -32700);
+					processComplete(false);
 				}
 			}
 		});
@@ -413,6 +596,15 @@ async function main() {
 			if (!data || data.includes('\n')) return;
 			
 			log(`[DEBUG] Received raw input: ${data.substring(0, 100)}${data.length > 100 ? '...' : ''}`);
+			
+			// Set processing flag to prevent early exit
+			isProcessing = true;
+			
+			// Clear any existing exit timer
+			if (exitDelayTimer) {
+				clearTimeout(exitDelayTimer);
+				exitDelayTimer = null;
+			}
 			
 			try {
 				const jsonData = JSON.parse(data);
@@ -429,7 +621,11 @@ async function main() {
 					} else {
 						// Unsupported tool
 						sendErrorResponse(`Tool not found: ${tool}`, "method_not_found", -32601, jsonData.id);
+						processComplete(false);
 					}
+				} else {
+					// Not a tool invocation, mark as complete
+					processComplete(true);
 				}
 			} catch (e) {
 				// Ignore parsing errors here as they'll be handled by readline
@@ -441,6 +637,7 @@ async function main() {
 			log(`Uncaught error: ${error.message}`);
 			log(error.stack);
 			sendErrorResponse(`Error processing request: ${error.message}`, "internal_error", -32603);
+			processComplete(false);
 		});
 		
 		// Connect to MCP channel
@@ -448,6 +645,18 @@ async function main() {
 		await server.connect(transport);
 		log('MCP service is ready and accepting multiple input formats');
 		log('Supported formats: Plain text prompts, JSON objects, and JSON-RPC 2.0 requests');
+		log(`Service will ${isPipeMode ? 'stay alive (pipe mode)' : 'auto-exit after completion (standalone mode)'}`);
+		
+		// Set an initial timer to exit if no requests received after a certain time
+		// But only if not running in pipe mode
+		if (!isPipeMode) {
+			exitDelayTimer = setTimeout(() => {
+				if (!isProcessing) {
+					log('No requests received, exiting...');
+					process.exit(0);
+				}
+			}, EXIT_DELAY_MS);
+		}
 	} catch (error) {
 		log('Failed to initialize MCP server:', error);
 		await logError(error);

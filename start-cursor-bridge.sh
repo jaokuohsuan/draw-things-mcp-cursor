@@ -134,6 +134,10 @@ echo "Step 2: Starting Cursor MCP Bridge Service..."
 echo "This service will allow Cursor to generate images using plain text prompts"
 echo
 
+# Set up environment variable to force the MCP service to stay alive
+export DRAW_THINGS_FORCE_STAY_ALIVE=true
+export MCP_BRIDGE_DEDUP=true
+
 # Set up debug mode
 if [ "$DEBUG_MODE" = true ]; then
   echo "Debug mode enabled, all log output will be displayed"

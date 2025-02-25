@@ -175,3 +175,5 @@ images/
 .cursor
 test-output
 cursor-mcp-bridge.log
+cursor-mcp-bridge.log.old
+draw-things-mcp.log
