@@ -10,10 +10,35 @@ Draw Things API integration for Cursor using Model Context Protocol (MCP).
 ## Installation
 
 ```bash
+# Install globally
+npm install -g draw-things-mcp-cursor
+
+# Or run directly
 npx draw-things-mcp-cursor
 ```
 
-## Usage
+## Cursor Integration
+
+To set up this tool in Cursor, see the detailed guide in [cursor-setup.md](./cursor-setup.md).
+
+Quick setup:
+
+1. Create or edit `~/.cursor/claude_desktop_config.json`:
+```json
+{
+  "mcpServers": {
+    "draw-things": {
+      "command": "draw-things-mcp-cursor",
+      "args": []
+    }
+  }
+}
+```
+
+2. Restart Cursor
+3. Use in Cursor: `generateImage({"prompt": "a cute cat"})`
+
+## CLI Usage
 
 ### Generate Image
 
@@ -86,6 +111,14 @@ Error:
   "code": 500
 }
 ```
+
+## Troubleshooting
+
+If you encounter issues:
+
+- Ensure Draw Things API is running at http://127.0.0.1:7888
+- Check log files in `~/.cursor/logs` if using with Cursor
+- Make sure src/index.js has execution permissions: `chmod +x src/index.js`
 
 ## License
 
