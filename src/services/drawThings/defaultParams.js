@@ -1,4 +1,4 @@
-// 這個檔案在 JavaScript 版本中不需要，因為我們不需要型別定義
+// This file is not needed in the JavaScript version, as we don't need type definitions
 export const defaultParams = {
   speed_up_with_guidance_embed: true,
   motion_scale: 127,

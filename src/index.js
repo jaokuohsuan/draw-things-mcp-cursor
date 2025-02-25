@@ -51,91 +51,86 @@ const drawThingsService = new DrawThingsService();
 server.tool(
 	"generateImage", 
 	"Generate an image using Draw Things API",
-	async (params) => {
+	async (params, cb) => {
 		console.log('Received generateImage request with params:', params);
 		try {
+			// Check if params is a valid object
+			if (!params || typeof params !== 'object') {
+				console.error('Invalid parameters');
+				return cb(null, {
+					content: [{
+						type: 'text',
+						text: 'Invalid parameters provided'
+					}],
+					isError: true
+				});
+			}
+
+			// Ensure prompt exists
+			if (!params.prompt) {
+				console.error('Missing prompt parameter');
+				return cb(null, {
+					content: [{
+						type: 'text',
+						text: 'Missing required parameter: prompt'
+					}],
+					isError: true
+				});
+			}
+
 			const result = await drawThingsService.generateImage(params);
 			
 			if (result.status >= 400) {
 				console.error('Generation failed:', result.error);
-				return {
-					type: 'error',
-					error: result.error || 'Failed to generate image',
-					code: result.status
-				};
+				return cb(null, {
+					content: [{
+						type: 'text',
+						text: result.error || 'Failed to generate image'
+					}],
+					isError: true
+				});
 			}
 
 			if (!result.images || result.images.length === 0) {
 				console.error('No images generated');
-				return {
-					type: 'error',
-					error: 'No images generated',
-					code: 500
-				};
+				return cb(null, {
+					content: [{
+						type: 'text',
+						text: 'No images generated'
+					}],
+					isError: true
+				});
 			}
 
 			// Save generated image to file
 			try {
 				const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-				const filename = `${params.prompt.replace(/[^a-z0-9]/gi, '_').substring(0, 30)}_${timestamp}.png`;
+				const filename = `${params.prompt ? params.prompt.replace(/[^a-z0-9]/gi, '_').substring(0, 30) : 'image'}_${timestamp}.png`;
 				const outputPath = path.join('images', filename);
 				await saveImage(result.images[0], outputPath);
+				console.log(`Image saved to: ${outputPath}`);
 			} catch (error) {
 				console.warn('Failed to save image to file:', error);
 				// Continue processing, as this should not block the MCP response
 			}
 
 			console.log('Successfully generated image');
-			return {
-				type: 'success',
+			return cb(null, {
 				content: [{
 					type: 'image',
 					data: result.images[0],
 					mimeType: 'image/png'
-				}],
-				metadata: {
-					parameters: result.parameters
-				}
-			};
+				}]
+			});
 		} catch (error) {
 			console.error('Error in generateImage handler:', error);
-			return {
-				type: 'error',
-				error: error.message || 'Internal server error',
-				code: 500
-			};
-		}
-	},
-	{
-		parameters: {
-			type: "object",
-			properties: {
-				prompt: {
-					type: "string",
-					description: "The prompt to generate the image from"
-				},
-				negative_prompt: {
-					type: "string",
-					description: "The negative prompt to avoid certain elements in the generated image"
-				},
-				width: {
-					type: "number",
-					description: "The width of the generated image"
-				},
-				height: {
-					type: "number",
-					description: "The height of the generated image"
-				},
-				model: {
-					type: "string",
-					description: "The model to use for generation"
-				},
-				steps: {
-					type: "number",
-					description: "Number of steps for generation"
-				}
-			},
-			required: ["prompt"]
+			return cb(error, {
+				content: [{
+					type: 'text',
+					text: error.message || 'Internal server error'
+				}],
+				isError: true
+			});
 		}
 	}
 );
