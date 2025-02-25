@@ -17,7 +17,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { DrawThingsService } from './services/drawThings/drawThingsService.js';
-import { ImageGenerationParamsSchema, McpResponseSchema } from './services/drawThings/schemas.js';
+import { ImageGenerationParamsSchema } from './services/drawThings/schemas.js';
 import fs from 'fs';
 import path from 'path';
 import { z } from 'zod';
@@ -29,20 +29,27 @@ async function saveImage(base64Data, outputPath) {
 		const imagesDir = path.dirname(outputPath);
 		if (!fs.existsSync(imagesDir)) {
 			await fs.promises.mkdir(imagesDir, { recursive: true });
+			console.error(`Created images directory: ${imagesDir}`);
 		}
 		
+		console.error(`Starting to save image, size: ${base64Data.length} characters`);
 		const buffer = Buffer.from(base64Data, 'base64');
+		console.error(`Image converted to buffer, size: ${buffer.length} bytes`);
+		
 		await fs.promises.writeFile(outputPath, buffer);
-		console.log(`Image saved to: ${outputPath}`);
+		console.error(`Image successfully saved to: ${outputPath}`);
+		return outputPath;
 	} catch (error) {
-		console.error('Error saving image:', error);
+		console.error(`Failed to save image: ${error.message}`);
+		console.error(error.stack);
+		throw error;
 	}
 }
 
 // Create MCP server
 const server = new McpServer({
 	name: 'draw-things-mcp',
-	version: '1.1.9',
+	version: '1.2.4',
 	description: 'Draw Things MCP Server'
 });
 
@@ -51,35 +58,47 @@ const drawThingsService = new DrawThingsService();
 
 // Helper function to create error response
 function createErrorResponse(message) {
-	return McpResponseSchema.parse({
+	return {
 		content: [{
 			type: 'text',
 			text: message
 		}],
 		isError: true
-	});
+	};
 }
 
 // Helper function to create image response
 function createImageResponse(imageData) {
-	return McpResponseSchema.parse({
+	return {
 		content: [{
 			type: 'image',
 			data: imageData,
 			mimeType: 'image/png'
 		}]
-	});
+	};
 }
 
-// Register image generation tool with Zod validation
+// Correctly register MCP tool - fix tool registration format
 server.tool(
 	"generateImage", 
 	"Generate an image using Draw Things API",
-	async (inputParams, context) => {
-		console.log('Received generateImage request with params:', inputParams);
+	{
+		prompt: z.string().describe("The prompt to generate an image from"),
+		negative_prompt: z.string().optional().describe("Negative prompt to guide what not to include"),
+		seed: z.number().optional().describe("Random seed for reproducibility"),
+		width: z.number().optional().describe("Width of the generated image"),
+		height: z.number().optional().describe("Height of the generated image"),
+		num_inference_steps: z.number().min(4).max(50).optional().describe("Number of inference steps"),
+		guidance_scale: z.number().optional().describe("Guidance scale for generation"),
+		model: z.string().optional().describe("Model to use for generation")
+	},
+	async (params) => {
+		console.error('Received generateImage request with params:', params);
 		try {
 			// Use Zod to validate parameters
-			const parseResult = ImageGenerationParamsSchema.safeParse(inputParams);
+			const parseResult = ImageGenerationParamsSchema.safeParse(params);
+			console.error('Parameter validation result:', parseResult.success);
+			
 			if (!parseResult.success) {
 				console.error('Parameter validation failed:', parseResult.error.format());
 				return createErrorResponse(`Invalid parameters: ${parseResult.error.message}`);
@@ -101,43 +120,50 @@ server.tool(
 			// Save generated image to file
 			try {
 				const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-				const prompt = result.parameters?.prompt || 'image';
+				const prompt = parseResult.data?.prompt || 'image';
 				const filename = `${prompt.replace(/[^a-z0-9]/gi, '_').substring(0, 30)}_${timestamp}.png`;
 				const outputPath = path.join('images', filename);
 				await saveImage(result.images[0], outputPath);
-				console.log(`Image saved to: ${outputPath}`);
-			} catch (error) {
-				console.warn('Failed to save image to file:', error);
-				// Continue processing, as this should not block the MCP response
-			}
+				console.error(`Image successfully saved to: ${outputPath}`);
 
-			console.log('Successfully generated image');
-			return createImageResponse(result.images[0]);
+				// Ensure image is saved successfully before returning response
+				console.error('Preparing to return MCP response with image data');
+				return createImageResponse(result.images[0]);
+			} catch (error) {
+				console.error(`Failed to save image, but will still try to return response: ${error.message}`);
+				// Even if saving to the file system fails, still return image data
+				return createImageResponse(result.images[0]);
+			}
 		} catch (error) {
 			console.error('Error in generateImage handler:', error);
+			await logError(error);
 			return createErrorResponse(error.message || 'Internal server error');
 		}
 	}
 );
 
-// Start MCP server using immediately invoked function expression
-(async () => {
+// Error logging function
+async function logError(error) {
 	try {
-		const transport = new StdioServerTransport();
+		const timestamp = new Date().toISOString();
+		const errorMessage = `${timestamp} - ${error.stack || error}\n`;
+		await fs.promises.appendFile('error.log', errorMessage);
+	} catch (logError) {
+		console.error('Failed to write error log:', logError);
+	}
+}
+
+// Simplified main program
+async function main() {
+	try {
+		console.error('Starting Draw Things MCP service...');
+		console.error('Initializing Draw Things MCP service');
 		
-		// Ensure stdout is only used for JSON messages
-		const originalStdoutWrite = process.stdout.write.bind(process.stdout);
-		process.stdout.write = (chunk, encoding, callback) => {
-			// Only allow JSON messages to pass through
-			if (typeof chunk === "string" && !chunk.startsWith("{")) {
-				return true; // Silently skip non-JSON messages
-			}
-			return originalStdoutWrite(chunk, encoding, callback);
-		};
+		const transport = new StdioServerTransport();
 		
 		// Handle SIGINT signal (Ctrl+C)
 		process.on('SIGINT', async () => {
-			console.log('\nReceived SIGINT. Closing server...');
+			console.error('\nReceived SIGINT. Closing server...');
 			try {
 				await transport.close();
 				process.exit(0);
@@ -146,70 +172,129 @@ server.tool(
 				process.exit(1);
 			}
 		});
-
-		console.log('Starting Draw Things MCP service...');
-		console.log('Connecting to Draw Things API...');
 		
-		await server.connect(transport);
-		console.log('MCP service is ready');
-
-		// CLI mode handling (when not used through MCP)
-		// Check if stdin is available and not being used through MCP
-		if (!process.stdin.isTTY && process.argv.length <= 2) {
-			let data = '';
-			process.stdin.on('data', chunk => {
-				data += chunk;
-			});
-
-			process.stdin.on('end', async () => {
-				try {
-					if (!data.trim()) {
-						console.log('No input received. Exiting CLI mode.');
-						process.exit(0);
-					}
-
-					// Parse and validate CLI input parameters
-					let params;
-					try {
-						const rawParams = JSON.parse(data);
-						const parseResult = ImageGenerationParamsSchema.safeParse(rawParams);
-						if (!parseResult.success) {
-							console.error('Invalid CLI parameters:', parseResult.error.format());
-							process.exit(1);
+		// Add direct JSON-RPC handling, bypassing official SDK processing
+		process.stdin.on('data', async (chunk) => {
+			const data = chunk.toString().trim();
+			console.error(`[DEBUG] Received raw input: ${data.substring(0, 100)}${data.length > 100 ? '...' : ''}`);
+			
+			try {
+				const jsonData = JSON.parse(data);
+				console.error(`[DEBUG] Parsed JSON: method=${jsonData.method}, id=${jsonData.id}`);
+				
+				// Only process mcp.invoke method
+				if (jsonData.method === 'mcp.invoke' && jsonData.params && jsonData.params.tool) {
+					const { tool, parameters } = jsonData.params;
+					console.error(`[DEBUG] Handling direct request for tool: ${tool}`);
+					
+					// Check if it's the generateImage tool
+					if (tool === 'generateImage') {
+						try {
+							// Call image generation service
+							const result = await drawThingsService.generateImage(parameters || {});
+							
+							if (result.status >= 400 || result.error) {
+								// Return error response
+								const errorMessage = result.error || 'Failed to generate image';
+								const response = {
+									jsonrpc: '2.0',
+									id: jsonData.id,
+									result: createErrorResponse(errorMessage)
+								};
+								process.stdout.write(JSON.stringify(response) + '\n');
+							} else if (result.images && result.images.length > 0) {
+								// Save image to file system
+								try {
+									const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+									const prompt = parameters?.prompt || 'image';
+									const filename = `${prompt.replace(/[^a-z0-9]/gi, '_').substring(0, 30)}_${timestamp}.png`;
+									const outputPath = path.join('images', filename);
+									await saveImage(result.images[0], outputPath);
+									console.error(`Successfully saved image to file system: ${outputPath}`);
+									
+									// Ensure image is saved before returning response
+									const response = {
+										jsonrpc: '2.0',
+										id: jsonData.id,
+										result: createImageResponse(result.images[0])
+									};
+									console.error('Preparing to return MCP response with image data');
+									process.stdout.write(JSON.stringify(response) + '\n');
+									console.error('MCP response sent');
+								} catch (saveError) {
+									console.error(`Error saving image: ${saveError.message}`);
+									
+									// Return image response even if saving fails
+									const response = {
+										jsonrpc: '2.0',
+										id: jsonData.id,
+										result: createImageResponse(result.images[0])
+									};
+									process.stdout.write(JSON.stringify(response) + '\n');
+								}
+							} else {
+								// No images
+								const response = {
+									jsonrpc: '2.0',
+									id: jsonData.id,
+									result: createErrorResponse('No images were generated')
+								};
+								process.stdout.write(JSON.stringify(response) + '\n');
+							}
+						} catch (error) {
+							// Handle error
+							console.error(`[ERROR] Error processing generateImage request: ${error.message}`);
+							const response = {
+								jsonrpc: '2.0',
+								id: jsonData.id,
+								result: createErrorResponse(`Internal error: ${error.message}`)
+							};
+							process.stdout.write(JSON.stringify(response) + '\n');
 						}
-						params = parseResult.data;
-					} catch (error) {
-						console.error('Failed to parse CLI input:', error.message);
-						process.exit(1);
+					} else {
+						// Unsupported tool
+						const response = {
+							jsonrpc: '2.0',
+							id: jsonData.id,
+							error: {
+								code: -32601,
+								message: `Tool not found: ${tool}`
+							}
+						};
+						process.stdout.write(JSON.stringify(response) + '\n');
 					}
-
-					console.log('CLI Mode: Received parameters:', params);
-					
-					const result = await drawThingsService.generateImage(params);
-					console.log('Generation result:', result);
-					
-					if (result.status >= 400) {
-						console.error('Generation failed:', result.error);
-						process.exit(1);
-					}
-
-					if (result.images && result.images.length > 0) {
-						const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-						const filename = `${params.prompt?.replace(/[^a-z0-9]/gi, '_') || 'image'}_${timestamp}.png`;
-						const outputPath = path.join('images', filename);
-						await saveImage(result.images[0], outputPath);
-					}
-					
-					console.log('Image generated successfully');
-					process.exit(0);
-				} catch (error) {
-					console.error('Error processing CLI request:', error);
-					process.exit(1);
+				} else if (jsonData.method === 'mcp.invoke') {
+					// Incorrect request structure
+					const response = {
+						jsonrpc: '2.0',
+						id: jsonData.id,
+						error: {
+							code: -32602,
+							message: 'Invalid params for mcp.invoke'
+						}
+					};
+					process.stdout.write(JSON.stringify(response) + '\n');
 				}
-			});
-		}
+				// Other methods will be handled by the SDK
+			} catch (e) {
+				console.error(`[DEBUG] Failed to parse or process input: ${e.message}`);
+			}
+		});
+		
+		// Connect to MCP channel
+		console.error('Connecting to MCP transport...');
+		await server.connect(transport);
+		console.error('MCP service is ready');
 	} catch (error) {
 		console.error('Failed to initialize MCP server:', error);
+		await logError(error);
 		process.exit(1);
 	}
-})();
+}
+
+// Start service
+main().catch(async (error) => {
+	console.error('Unexpected error in MCP server:', error);
+	await logError(error);
+	process.exit(1);
+});

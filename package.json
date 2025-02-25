@@ -10,11 +10,13 @@
 	},
 	"scripts": {
 		"start": "node src/index.js",
-		"dev": "node src/index.js"
+		"dev": "node src/index.js",
+		"test": "node test-mcp.js"
 	},
 	"dependencies": {
 		"@modelcontextprotocol/sdk": "^1.6.0",
 		"axios": "^1.6.7",
+		"node-fetch": "^3.3.2",
 		"zod": "^3.24.2"
 	},
 	"files": [

@@ -24,14 +24,14 @@ export const defaultParams = {
   diffusion_tile_width: 1024,
   diffusion_tile_overlap: 128,
   original_width: 512,
-  seed: 4192514619,
+  seed: 622911551,
   zero_negative_prompt: false,
   upscaler_scale: 0,
   steps: 8,
   upscaler: null,
   mask_blur: 1.5,
   sampler: "DPM++ 2M AYS",
-  width: 360,
+  width: 320,
   negative_original_width: 512,
   batch_count: 1,
   refiner_model: null,
@@ -64,6 +64,6 @@ export const defaultParams = {
   fps: 5,
   refiner_start: 0.8500000238418579,
   height: 512,
-  prompt: "A cute koala sitting on a eucalyptus tree, gray-brown fur, big ears, black nose, eating eucalyptus leaves, high-definition details, realistic texture, soft natural lighting",
-  negative_prompt: "deformed, distorted, unnatural pose, extra limbs, blurry, low quality"
+  prompt: "A cute koala sitting on a eucalyptus tree, watercolor style, beautiful lighting, detailed",
+  negative_prompt: "deformed, distorted, unnatural pose, extra limbs, blurry, low quality, ugly, bad anatomy, poor details, mutated, text, watermark"
 }; 
