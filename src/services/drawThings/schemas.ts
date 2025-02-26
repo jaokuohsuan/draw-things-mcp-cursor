@@ -25,7 +25,7 @@ export const ImageGenerationParamsSchema = z.object({
   // Other available parameters, but not strictly required
 }).passthrough(); // Allow other unknown parameters to pass through
 
-// Define the type from the schema
+// Define the type from the schemndea
 export type ImageGenerationParams = z.infer<typeof ImageGenerationParamsSchema>;
 
 // Generation result structure definition

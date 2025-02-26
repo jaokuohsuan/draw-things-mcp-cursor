@@ -3,28 +3,34 @@
 /**
  * Draw Things MCP - A Model Context Protocol implementation for Draw Things API
  * Integrated with Cursor MCP Bridge functionality for multiple input formats
+ * 
+ * NOTE: Requires Node.js version 14+ for optional chaining support in dependencies
  */
 
 import path from 'path';
 import fs from 'fs';
 import http from 'http';
-import readline from 'readline';
 import { z } from 'zod';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { fileURLToPath } from 'url';
+
+// MCP SDK imports
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { 
+  ErrorCode,
+  McpError,
+} from '@modelcontextprotocol/sdk/types.js';
+
+// Local service imports
 import { DrawThingsService } from './services/drawThings/drawThingsService.js';
 import { ImageGenerationParamsSchema } from './services/drawThings/schemas.js';
-import { fileURLToPath } from 'url';
 import { 
-  JsonRpcRequest, 
-  JsonRpcResponse, 
-  ImageResponse, 
   ImageGenerationParameters, 
   ImageGenerationResult 
 } from './interfaces/index.js';
 
 // Type-safe function declarations
-function createErrorResponse(message: string): ImageResponse {
+function createErrorResponse(message: string): any {
   return {
     content: [{
       base64: '',
@@ -40,11 +46,11 @@ function createErrorResponse(message: string): ImageResponse {
   };
 }
 
-function createImageResponse(imageData: string): ImageResponse {
+function createImageResponse(imageData: string, imagePath: string): any {
   return {
     content: [{
       base64: imageData.replace(/^data:image\/png;base64,/, ''),
-      path: '',
+      path: imagePath,
       prompt: '',
       seed: 0,
       width: 0,
@@ -53,83 +59,6 @@ function createImageResponse(imageData: string): ImageResponse {
     }]
   };
 }
-
-// Track processed request IDs to avoid duplicate processing
-const processedRequestIds: Set<string> = new Set();
-const processedPrompts: Map<string, number> = new Map(); // Track processed prompts with timestamps
-const REQUEST_HISTORY_LIMIT = 100; // Limit the size of our history to prevent memory leaks
-const PROMPT_HISTORY_EXPIRE_MS = 60000; // 60 seconds expiry for prompt history
-
-// Helper to prevent duplicate request processing
-function markRequestAsProcessed(requestId: string): void {
-  // Add to processed set
-  processedRequestIds.add(requestId);
-  
-  // Keep set size limited
-  if (processedRequestIds.size > REQUEST_HISTORY_LIMIT) {
-    // Remove oldest entry (first item in the set)
-    const iterator = processedRequestIds.values();
-    const firstItem = iterator.next();
-    if (firstItem.value) {
-      processedRequestIds.delete(firstItem.value);
-    }
-  }
-}
-
-function hasRequestBeenProcessed(requestId: string): boolean {
-  return processedRequestIds.has(requestId);
-}
-
-// Helper to track and prevent duplicate prompt processing
-function isPromptDuplicate(promptContent: string | undefined): boolean {
-  if (!promptContent) return false;
-  
-  // Clean up old entries first
-  const now = Date.now();
-  for (const [prompt, timestamp] of processedPrompts.entries()) {
-    if (now - timestamp > PROMPT_HISTORY_EXPIRE_MS) {
-      processedPrompts.delete(prompt);
-    }
-  }
-  
-  // Check if this prompt was recently processed
-  const normalizedPrompt = promptContent.trim().toLowerCase();
-  
-  // Only consider it duplicate if processed in the last 2000ms (increased from 100ms)
-  // This prevents legitimate repeated requests from being blocked
-  const lastProcessed = processedPrompts.get(normalizedPrompt);
-  if (lastProcessed && (now - lastProcessed) < 2000) {
-    // Don't log duplicates when they're expected
-    if (now - lastProcessed > 500) {
-      log(`Duplicate prompt detected within 2 seconds: "${normalizedPrompt.substring(0, 30)}..."`);
-    }
-    return true;
-  }
-  
-  // Add to processed prompts with current timestamp
-  processedPrompts.set(normalizedPrompt, now);
-  
-  // Keep map size limited
-  if (processedPrompts.size > REQUEST_HISTORY_LIMIT) {
-    // Remove oldest entry (first item in the map)
-    const iterator = processedPrompts.keys();
-    const firstItem = iterator.next();
-    if (firstItem.value) {
-      processedPrompts.delete(firstItem.value);
-    }
-  }
-  
-  return false;
-}
-
-// Global variables with type definitions
-let isProcessing: boolean = false;
-let exitDelayTimer: NodeJS.Timeout | null = null;
-const EXIT_DELAY_MS: number = 300000; // 5 minutes waiting time after successful completion
-let isPipeMode: boolean = false; // Flag to indicate if running in pipe mode
-
-// Initialize DrawThingsService
-const drawThingsService = new DrawThingsService();
 
 // Constants and environment variables
 const DEBUG_MODE: boolean = process.env.DEBUG_MODE === 'true';
@@ -232,256 +161,6 @@ async function saveImage(base64Data: string, outputPath: string): Promise<string
   }
 }
 
-// Function to signal completion of a task
-function processComplete(success: boolean): void {
-  log(`Process complete. Success: ${success}`);
-  isProcessing = false;
-  
-  // Clear any existing timer
-  if (exitDelayTimer) {
-    clearTimeout(exitDelayTimer);
-    exitDelayTimer = null;
-  }
-  
-  // Only exit if not in pipe mode
-  if (!isPipeMode) {
-    // Set a timer to exit, giving time for any final operations to complete
-    exitDelayTimer = setTimeout(() => {
-      log('Exiting after successful completion (standalone mode)');
-      process.exit(0);
-    }, EXIT_DELAY_MS);
-  } else {
-    log('Completed processing request (pipe mode) - staying alive for additional requests');
-  }
-}
-
-// Gracefully handle errors when writing to stdout
-function safeWrite(data: string): void {
-  try {
-    // Only write to stdout if it's valid JSON-RPC
-    process.stdout.write(data + '\n');
-  } catch (error) {
-    // If we get EPIPE, the other end has closed the pipe
-    const err = error as any;
-    if (err instanceof Error && err.code === 'EPIPE') {
-      log('Pipe has been closed, exiting gracefully');
-      process.exit(0);
-    } else {
-      log(`Error writing to stdout: ${error instanceof Error ? error.message : String(error)}`);
-      // For other errors, don't exit but log the issue
-    }
-  }
-}
-
-// Send error response conforming to JSON-RPC 2.0 with safe write
-function sendErrorResponse(
-  message: string, 
-  errorType: string = "invalid_request", 
-  code: number = -32600, 
-  id: string = "error-" + Date.now()
-): void {
-  const errorResponse: JsonRpcResponse = {
-    jsonrpc: "2.0",
-    id: id,
-    error: {
-      code: code,
-      message: errorType,
-      data: message
-    }
-  };
-  
-  log(`Sending error response: ${JSON.stringify(errorResponse)}`);
-  safeWrite(JSON.stringify(errorResponse));
-}
-
-// Process request to ensure it has the correct JSON-RPC 2.0 structure
-function processRequest(request: string | JsonRpcRequest): JsonRpcRequest | null {
-  log(`Processing request: ${JSON.stringify(request).substring(0, 100)}...`);
-  
-  try {
-    let processedRequest: JsonRpcRequest;
-    
-    // For plain text input, create a proper request structure
-    if (typeof request === 'string') {
-      processedRequest = {
-        jsonrpc: "2.0",
-        id: Date.now().toString(),
-        method: "mcp.invoke",
-        params: {
-          tool: "generateImage",
-          parameters: {
-            prompt: request.trim()
-          }
-        }
-      };
-    } else {
-      processedRequest = request;
-    }
-    
-    // Ensure request has the correct structure
-    if (!processedRequest.jsonrpc) processedRequest.jsonrpc = "2.0";
-    if (!processedRequest.id) processedRequest.id = Date.now().toString();
-    
-    // If no method, set to mcp.invoke
-    if (!processedRequest.method) {
-      processedRequest.method = "mcp.invoke";
-    }
-    
-    // Process params
-    if (!processedRequest.params) {
-      // Try to build params from different sources
-      if (processedRequest.prompt || processedRequest.parameters) {
-        processedRequest.params = {
-          tool: "generateImage",
-          parameters: processedRequest.prompt 
-            ? { prompt: processedRequest.prompt } 
-            : (processedRequest.parameters || {})
-        };
-      } else {
-        // No usable parameters found
-        log('No usable parameters found in request');
-        return null;
-      }
-    }
-    
-    log(`Processed request: ${JSON.stringify(processedRequest).substring(0, 150)}...`);
-    return processedRequest;
-  } catch (error) {
-    log(`Error processing request: ${error instanceof Error ? error.message : String(error)}`);
-    return null;
-  }
-}
-
-// Function to send proper JSON-RPC 2.0 formatted responses
-function sendJsonRpcResponse(id: string, result: any, isError: boolean = false): void {
-  try {
-    const response: JsonRpcResponse = {
-      jsonrpc: "2.0",
-      id: id,
-      result: result
-    };
-    
-    // Ensure we're sending a valid JSON string followed by newline
-    log(`Sending JSON-RPC response for id: ${id}, isError: ${isError}`);
-    safeWrite(JSON.stringify(response));
-  } catch (error) {
-    log(`Error creating JSON-RPC response: ${error instanceof Error ? error.message : String(error)}`);
-    
-    // Fallback to a simpler response format
-    try {
-      const fallbackResponse: JsonRpcResponse = {
-        jsonrpc: "2.0",
-        id: id,
-        result: {
-          content: [{
-            type: 'text',
-            text: isError 
-              ? `Error generating image: ${error instanceof Error ? error.message : String(error)}`
-              : 'Image generation completed, but there was an error creating the response'
-          }],
-          isError: isError
-        }
-      };
-      safeWrite(JSON.stringify(fallbackResponse));
-    } catch (secondError) {
-      log(`Critical error sending response: ${secondError instanceof Error ? secondError.message : String(secondError)}`);
-    }
-  }
-}
-
-// Process plain text input from MCP Bridge
-async function handleImageGeneration(parameters: ImageGenerationParameters, requestId: string): Promise<void> {
-  if (hasRequestBeenProcessed(requestId)) {
-    log(`Duplicate request ID detected and skipped: ${requestId}`);
-    return;
-  }
-
-  // Process only once per request ID
-  markRequestAsProcessed(requestId);
-  
-  // Set processing flag to prevent early exit
-  isProcessing = true;
-  
-  try {
-    log(`Handling image generation request ID: ${requestId}`);
-    
-    // Ensure we have a prompt
-    const userParams = parameters || {};
-    
-    // Extract prompt if it's the only parameter (for random_string from Cursor)
-    if (userParams.random_string && Object.keys(userParams).length === 1) {
-      userParams.prompt = userParams.random_string;
-      delete userParams.random_string;
-    }
-    
-    // Check prompt for duplication only for similar prompts
-    // Skip duplication check if this is a retry or has additional parameters
-    if (Object.keys(userParams).length <= 1 && 
-        isPromptDuplicate(userParams.prompt) && 
-        !requestId.includes('retry')) {
-      log(`Duplicate prompt detected for request ${requestId}, skipping`);
-      return sendJsonRpcResponse(requestId, createErrorResponse('Duplicate request detected and skipped'));
-    }
-    
-    log(`Generating image for prompt: ${JSON.stringify(userParams).substring(0, 100)}...`);
-    
-    // Generate image with retry logic
-    const result: ImageGenerationResult = await drawThingsService.generateImage(userParams);
-    
-    // Handle generation result
-    if (result.isError) {
-      log(`Error generating image: ${result.errorMessage}`);
-      return sendJsonRpcResponse(requestId, createErrorResponse(result.errorMessage || 'Unknown error'), true);
-    }
-    
-    if (!result.imageData && (!result.images || result.images.length === 0)) {
-      log('No image data returned from generation');
-      return sendJsonRpcResponse(requestId, createErrorResponse('No image data returned from generation'), true);
-    }
-    
-    const imageData = result.imageData || (result.images && result.images.length > 0 ? result.images[0] : undefined);
-    if (!imageData) {
-      log('No valid image data available');
-      return sendJsonRpcResponse(requestId, createErrorResponse('No valid image data available'), true);
-    }
-    
-    // Save image to file system
-    try {
-      const timestamp = new Date().toISOString().replace(/:/g, '-');
-      const prompt = userParams.prompt || 'generated-image';
-      const safePrompt = prompt.substring(0, 30).replace(/[^a-zA-Z0-9]/g, '_');
-      const imagePath = path.join('images', `${safePrompt}_${timestamp}.png`);
-      
-      // Save image to file system
-      await saveImage(imageData, imagePath);
-      log(`Successfully saved image to file system: ${imagePath}`);
-      
-      // Return response with image data
-      log('Preparing to return MCP response with image data');
-      const imageResponse: ImageResponse = createImageResponse(imageData);
-      
-      // Add file path to response
-      imageResponse.imageSavedPath = imagePath;
-      
-      // Send JSON-RPC 2.0 formatted response
-      sendJsonRpcResponse(requestId, imageResponse);
-      log('MCP response sent');
-    } catch (saveError) {
-      log(`Error saving image: ${saveError instanceof Error ? saveError.message : String(saveError)}`);
-      return sendJsonRpcResponse(requestId, createErrorResponse(`Failed to save image: ${saveError instanceof Error ? saveError.message : String(saveError)}`), true);
-    }
-  } catch (error) {
-    log(`Error handling image generation: ${error instanceof Error ? error.message : String(error)}`);
-    await logError(error);
-    
-    // Send error response in JSON-RPC 2.0 format
-    sendJsonRpcResponse(requestId, createErrorResponse(`Internal error: ${error instanceof Error ? error.message : String(error)}`), true);
-  } finally {
-    // Signal that the request is complete
-    processComplete(true);
-  }
-}
-
 // Print connection information and help message on startup
 function printConnectionInfo(): void {
   // Only print to stderr to avoid polluting JSON-RPC communication
@@ -506,7 +185,7 @@ Starting service...
   log(infoText);
 }
 
-// Simplified main program
+// Main program
 async function main(): Promise<void> {
   try {
     log('Starting Draw Things MCP service...');
@@ -515,6 +194,9 @@ async function main(): Promise<void> {
     printConnectionInfo();
     
     log('Initializing Draw Things MCP service');
+    
+    // Initialize DrawThingsService
+    const drawThingsService = new DrawThingsService();
     
     // Enhanced API connection verification with direct method
     log('Checking Draw Things API connection before starting service...');
@@ -580,14 +262,86 @@ async function main(): Promise<void> {
       log('\nFAILED TO CONNECT TO DRAW THINGS API');
       log('Please make sure Draw Things is running and the API is enabled.');
       log('The service will continue running, but image generation will not work until the API is available.\n');
-      
-      // Still continue - the service should auto-retry on each request
-      log('Continuing despite connection failure - will retry on each request');
     } else {
       log('\nSUCCESSFULLY CONNECTED TO DRAW THINGS API');
       log('The service is ready to generate images.\n');
     }
 
+    // Create MCP server instance
+    const server = new McpServer({
+      name: "draw-things-mcp",
+      version: "1.0.0",
+    });
+
+    // Define the image generation tool schema
+    const paramsSchema = {
+      prompt: z.string().optional(),
+      negative_prompt: z.string().optional(),
+      width: z.number().optional(),
+      height: z.number().optional(),
+      steps: z.number().optional(),
+      seed: z.number().optional(),
+      guidance_scale: z.number().optional(),
+      random_string: z.string().optional(),
+    };
+
+    // Register image generation tool
+    server.tool(
+      "generateImage",
+      {...paramsSchema},
+      async (extra) => {
+        try {
+          // Extract parameters from the request
+          const parameters = extra.request.params.parameters as ImageGenerationParameters;
+          log(`Processing generateImage request: ${JSON.stringify(parameters).substring(0, 100)}...`);
+          
+          // Generate image
+          const result: ImageGenerationResult = await drawThingsService.generateImage(parameters);
+          
+          // Handle generation result
+          if (result.isError) {
+            log(`Error generating image: ${result.errorMessage}`);
+            throw new Error(result.errorMessage || 'Unknown error');
+          }
+          
+          if (!result.imageData && (!result.images || result.images.length === 0)) {
+            log('No image data returned from generation');
+            throw new Error('No image data returned from generation');
+          }
+          
+          const imageData = result.imageData || (result.images && result.images.length > 0 ? result.images[0] : undefined);
+          if (!imageData) {
+            log('No valid image data available');
+            throw new Error('No valid image data available');
+          }
+          
+          // Save image to file system
+          try {
+            const timestamp = new Date().toISOString().replace(/:/g, '-');
+            const prompt = parameters.prompt || 'generated-image';
+            const safePrompt = prompt.substring(0, 30).replace(/[^a-zA-Z0-9]/g, '_');
+            const imagePath = path.join('images', `${safePrompt}_${timestamp}.png`);
+            
+            // Save image
+            await saveImage(imageData, imagePath);
+            log(`Successfully saved image to file system: ${imagePath}`);
+            
+            // Return response with image data
+            return createImageResponse(imageData, imagePath);
+          } catch (saveError) {
+            log(`Error saving image: ${saveError instanceof Error ? saveError.message : String(saveError)}`);
+            throw new Error(`Failed to save image: ${saveError instanceof Error ? saveError.message : String(saveError)}`);
+          }
+        } catch (error) {
+          log(`Error handling image generation: ${error instanceof Error ? error.message : String(error)}`);
+          await logError(error);
+          throw error;
+        }
+      }
+    );
+
+    // Create transport and connect server
+    log('Creating transport and connecting server...');
     const transport = new StdioServerTransport();
     
     // Handle SIGINT signal (Ctrl+C)
@@ -602,13 +356,7 @@ async function main(): Promise<void> {
       }
     });
     
-    // Handle EPIPE specially
-    process.on('EPIPE', () => {
-      log('EPIPE signal received - pipe has been closed');
-      process.exit(0);
-    });
-    
-    // Handle broken pipe specifically
+    // Handle EPIPE error
     process.stdout.on('error', (err: NodeJS.ErrnoException) => {
       if (err.code === 'EPIPE') {
         log('Broken pipe detected on stdout');
@@ -618,153 +366,21 @@ async function main(): Promise<void> {
       }
     });
     
-    // Set up readline interface for line-by-line processing
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-      terminal: false
+    // Keep the process alive to prevent timeout
+    const keepAliveInterval = setInterval(() => {
+      // No operation, keep the process alive
+    }, 30000);
+
+    // Clean up on exit
+    process.on('exit', () => {
+      clearInterval(keepAliveInterval);
     });
     
-    // Listen for line input (for plain text and simple JSON formats)
-    rl.on('line', (line: string) => {
-      if (!line || line.trim() === '') return;
-      
-      log(`Received line input: ${line.substring(0, 100)}${line.length > 100 ? '...' : ''}`);
-      
-      // Set processing flag to prevent early exit
-      isProcessing = true;
-      
-      // Clear any existing exit timer
-      if (exitDelayTimer) {
-        clearTimeout(exitDelayTimer);
-        exitDelayTimer = null;
-      }
-      
-      // Check if input is already in JSON format
-      try {
-        const jsonInput = JSON.parse(line);
-        log('Input is valid JSON, checking if it conforms to JSON-RPC 2.0 standard');
-        
-        // Check if it conforms to JSON-RPC 2.0 standard
-        if (jsonInput.jsonrpc === "2.0" && jsonInput.method && jsonInput.id) {
-          log('Input already conforms to JSON-RPC 2.0 standard, forwarding directly');
-          
-          // Process mcp.invoke method directly
-          if (jsonInput.method === 'mcp.invoke' && jsonInput.params && jsonInput.params.tool) {
-            const { tool, parameters } = jsonInput.params;
-            
-            if (tool === 'generateImage') {
-              handleImageGeneration(parameters, jsonInput.id);
-            } else {
-              // Unsupported tool
-              sendErrorResponse(`Tool not found: ${tool}`, "method_not_found", -32601, jsonInput.id);
-              processComplete(false);
-            }
-          } else {
-            // Let the MCP SDK handle other methods
-            safeWrite(line);
-            // For non-image generation methods, mark as complete immediately
-            processComplete(true);
-          }
-        } else {
-          log('JSON format is valid but does not conform to JSON-RPC 2.0 standard, converting');
-          const processedRequest = processRequest(jsonInput);
-          if (processedRequest) {
-            if (processedRequest.method === 'mcp.invoke' && 
-                processedRequest.params && 
-                processedRequest.params.tool === 'generateImage') {
-              handleImageGeneration(processedRequest.params.parameters, processedRequest.id);
-            } else {
-              safeWrite(JSON.stringify(processedRequest));
-              // For non-image generation methods, mark as complete immediately
-              processComplete(true);
-            }
-          } else {
-            processComplete(false);
-          }
-        }
-      } catch (e) {
-        log(`Input is not valid JSON: ${e instanceof Error ? e.message : String(e)}`);
-        
-        // Check if it's a plain text prompt
-        if (line && typeof line === 'string' && !line.startsWith('{')) {
-          log('Detected plain text prompt, converting to JSON-RPC request');
-          
-          // Check for duplicate prompt content to prevent multiple processing
-          if (isPromptDuplicate(line.trim())) {
-            log(`Duplicate plain text prompt detected, skipping: "${line.trim().substring(0, 30)}..."`);
-            processComplete(false);
-            return;
-          }
-          
-          // Create request conforming to JSON-RPC 2.0 standard
-          const request: JsonRpcRequest = {
-            jsonrpc: "2.0",
-            id: Date.now().toString(),
-            method: "mcp.invoke",
-            params: {
-              tool: "generateImage",
-              parameters: {
-                prompt: line.trim()
-              }
-            }
-          };
-          
-          // Process the image generation request directly
-          handleImageGeneration(request.params && request.params.parameters ? request.params.parameters : {}, request.id);
-        } else {
-          log('Unrecognized input format, cannot process');
-          sendErrorResponse('Unrecognized input format', "parse_error", -32700);
-          processComplete(false);
-        }
-      }
-    });
+    // Connect server to transport
+    log('Connecting server to transport...');
+    await server.connect(transport);
+    log('MCP Server started successfully!');
     
-    // Add direct JSON-RPC handling for raw data (binary or chunked data)
-    process.stdin.on('data', async (chunk: Buffer) => {
-      // This handler will only process data that wasn't handled by the readline interface
-      // It's mainly for handling binary data or chunked JSON that might not end with newlines
-      const data = chunk.toString().trim();
-      
-      // Skip empty data or data that will be handled by readline
-      if (!data || data.includes('\n')) return;
-      
-      log(`[DEBUG] Received raw input: ${data.substring(0, 100)}${data.length > 100 ? '...' : ''}`);
-      
-      // Set processing flag to prevent early exit
-      isProcessing = true;
-      
-      // Clear any existing exit timer
-      if (exitDelayTimer) {
-        clearTimeout(exitDelayTimer);
-        exitDelayTimer = null;
-      }
-      
-      try {
-        const jsonData = JSON.parse(data) as JsonRpcRequest;
-        log(`[DEBUG] Parsed JSON from raw data: method=${jsonData.method}, id=${jsonData.id}`);
-        
-        // Only process if not already handled by readline
-        if (jsonData.method === 'mcp.invoke' && jsonData.params && jsonData.params.tool) {
-          const { tool, parameters } = jsonData.params;
-          log(`[DEBUG] Handling direct request for tool: ${tool}`);
-          
-          // Check if it's the generateImage tool
-          if (tool === 'generateImage') {
-            handleImageGeneration(parameters, jsonData.id);
-          } else {
-            // Unsupported tool
-            sendErrorResponse(`Tool not found: ${tool}`, "method_not_found", -32601, jsonData.id);
-            processComplete(false);
-          }
-        } else {
-          // Not a tool invocation, mark as complete
-          processComplete(true);
-        }
-      } catch (e) {
-        // Ignore parsing errors here as they'll be handled by readline
-      }
-    });
   } catch (error) {
     log(`Error in main program: ${error instanceof Error ? error.message : String(error)}`);
     await logError(error);
@@ -772,4 +388,5 @@ async function main(): Promise<void> {
   }
 }
 
+// Start the server
 main();
