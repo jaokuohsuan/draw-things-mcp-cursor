@@ -25,8 +25,14 @@ const logFile = 'draw-things-mcp.log';
 function log(message) {
 	const timestamp = new Date().toISOString();
 	const logMessage = `${timestamp} - ${message}\n`;
-	fs.appendFileSync(logFile, logMessage);
-	console.error(logMessage); // Also output to stderr for debugging
+	try {
+		fs.appendFileSync(logFile, logMessage);
+		console.error(logMessage); // Also output to stderr for debugging
+	} catch (error) {
+		// Fallback if file writing fails
+		console.error(`${timestamp} - [ERROR] Failed to write to log file: ${error.message}`);
+		console.error(logMessage);
+	}
 }
 
 // Initialize log
@@ -55,15 +61,22 @@ function startApiProxyServer() {
 			"Origin": "http://127.0.0.1:7888",
 			"Connection": "keep-alive",
 			"Accept": "application/json",
-			"Content-Type": "application/json"
+			"Content-Type": "application/json",
+			"User-Agent": "DrawThingsMCP/1.0" // Added User-Agent
 		},
-		// Add proxy timeout settings
-		proxyTimeout: 120000,
-		timeout: 120000,
+		// Increase proxy timeout settings for more stability
+		proxyTimeout: 240000, // 4 minutes
+		timeout: 240000, // 4 minutes
 		// Add additional options for stability
 		autoRewrite: true,
 		followRedirects: true,
-		selfHandleResponse: false
+		selfHandleResponse: false,
+		// Additional options for reliability
+		ignorePath: false,
+		prependPath: false,
+		toProxy: false,
+		preserveHeaderKeyCase: true,
+		localAddress: '127.0.0.1'
 	});
 	
 	// Create proxy server with enhanced error handling
@@ -472,14 +485,30 @@ server.tool(
 	}
 );
 
-// Error logging function
+// Enhanced error logging function
 async function logError(error) {
 	try {
 		const timestamp = new Date().toISOString();
-		const errorMessage = `${timestamp} - ${error.stack || error}\n`;
-		await fs.promises.appendFile('error.log', errorMessage);
+		const errorDetails = error.stack || error.message || String(error);
+		const errorMessage = `${timestamp} - [ERROR] ${errorDetails}\n`;
+		
+		// Ensure log directory exists
+		const errorLogFile = 'logs/error.log';
+		const errorLogDir = path.dirname(errorLogFile);
+		
+		if (!fs.existsSync(errorLogDir)) {
+			fs.mkdirSync(errorLogDir, { recursive: true });
+		}
+		
+		// Append to error log file
+		await fs.promises.appendFile(errorLogFile, errorMessage);
+		
+		// Also add to main log
+		log(`Logged error to ${errorLogFile}: ${error.message || String(error)}`);
 	} catch (logError) {
 		console.error('Failed to write error log:', logError);
+		// Still try to log to console
+		console.error(error);
 	}
 }
 
@@ -588,6 +617,13 @@ async function main() {
 		printConnectionInfo();
 		
 		log('Initializing Draw Things MCP service');
+		
+		// Start API proxy server first to ensure connectivity
+		log('Starting API proxy server...');
+		const proxyServer = startApiProxyServer();
+		
+		// Give proxy time to initialize
+		await new Promise(resolve => setTimeout(resolve, 1000));
 		
 		// Pre-check API connection
 		log('Checking Draw Things API connection before starting service...');

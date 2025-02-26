@@ -72,7 +72,7 @@ echo "Step 1: Checking if Draw Things API is available..."
 
 # Create a simple test script to check API connection
 cat > test-api.js << 'EOL'
-const http = require('http');
+import http from 'http';
 
 const options = {
   host: '127.0.0.1',

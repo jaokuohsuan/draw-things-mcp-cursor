@@ -30,7 +30,7 @@ class DrawThingsService {
   }
 
   async checkApiConnection() {
-    // Simple API connection check without retry logic
+    // Enhanced API connection check with better error handling and retry logic
     try {
       console.log('Checking API connection to:', this.baseUrl);
       
@@ -39,32 +39,47 @@ class DrawThingsService {
         return true;
       }
       
-      // Try options endpoint first
-      try {
-        console.log('Trying options endpoint...');
-        const response = await this.axios.get('/sdapi/v1/options', { timeout: 5000 });
-        if (response.status >= 200 && response.status < 500) {
-          console.log('Connected successfully to options endpoint');
-          this.connectionEstablished = true;
-          return true;
+      // Define endpoints to try in order
+      const endpoints = [
+        '/sdapi/v1/options',  // Primary endpoint
+        '/sdapi/v1/samplers', // Alternative endpoint
+        '/',                  // Root endpoint as last resort
+      ];
+      
+      // Try each endpoint with retry
+      for (const endpoint of endpoints) {
+        console.log(`Trying endpoint: ${endpoint}`);
+        
+        // Try up to 3 times per endpoint
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          try {
+            console.log(`Attempt ${attempt} for ${endpoint}`);
+            const response = await this.axios.get(endpoint, { 
+              timeout: attempt * 2000, // Increase timeout with each attempt
+              validateStatus: (status) => status >= 200 // Accept any non-error response
+            });
+            
+            if (response.status >= 200) {
+              console.log(`Connected successfully to ${endpoint} (Attempt ${attempt})`);
+              // Update base URL with successful path if it was the root
+              if (endpoint === '/') {
+                this.baseUrl = this.axios.defaults.baseURL;
+                console.log(`Updated base URL to: ${this.baseUrl}`);
+              }
+              this.connectionEstablished = true;
+              return true;
+            }
+          } catch (attemptError) {
+            console.log(`Attempt ${attempt} failed for ${endpoint}: ${attemptError.message}`);
+            if (attempt < 3) {
+              console.log(`Waiting before retry...`);
+              await new Promise(resolve => setTimeout(resolve, 1000)); // Wait before retry
+            }
+          }
         }
-      } catch (optionsError) {
-        console.log('Options endpoint unavailable, trying root endpoint...');
       }
       
-      // Try root endpoint as fallback
-      try {
-        const response = await this.axios.get('/', { timeout: 5000 });
-        if (response.status >= 200) {
-          console.log('Connected successfully to root endpoint');
-          this.connectionEstablished = true;
-          return true;
-        }
-      } catch (rootError) {
-        console.log('Root endpoint unavailable');
-      }
-      
-      console.error('Draw Things API is not responding on any endpoint');
+      console.error('Draw Things API is not responding on any endpoint after all retries');
       return false;
     } catch (error) {
       console.error('API connection check failed:', error.message);
@@ -156,28 +171,61 @@ class DrawThingsService {
       console.log('Sending request to Draw Things API...');
       console.log('Request parameters:', mergedParams);
       
-      const response = await this.axios.post('/sdapi/v1/txt2img', mergedParams);
-      console.log('Received API response');
+      // Implement retry logic for API requests
+      const maxRetries = 3;
+      let lastError = null;
       
-      if (response.status >= 400) {
-        console.error('API error:', response.data);
-        return ImageGenerationResultSchema.parse({
-          status: response.status,
-          error: response.data?.error || `API returned error status: ${response.status}`
-        });
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+          console.log(`API request attempt ${attempt} of ${maxRetries}`);
+          const response = await this.axios.post('/sdapi/v1/txt2img', mergedParams, {
+            timeout: 120000 + (attempt * 30000), // Increase timeout with each retry
+          });
+          
+          console.log(`Received API response on attempt ${attempt}`);
+          
+          if (response.status >= 400) {
+            console.error('API error:', response.data);
+            lastError = {
+              status: response.status,
+              error: response.data?.error || `API returned error status: ${response.status}`
+            };
+            // Only retry on 5xx errors, not on 4xx errors
+            if (response.status < 500) break;
+          } else if (!response.data || !response.data.images || response.data.images.length === 0) {
+            lastError = {
+              status: 404,
+              error: 'No images were generated by the API'
+            };
+          } else {
+            // Success case
+            return ImageGenerationResultSchema.parse({
+              status: response.status,
+              images: response.data.images,
+              parameters: mergedParams
+            });
+          }
+        } catch (requestError) {
+          console.error(`Request attempt ${attempt} failed:`, requestError.message);
+          lastError = {
+            status: requestError.response?.status || 500,
+            error: requestError.message
+          };
+          
+          // If not the last attempt, wait before retry
+          if (attempt < maxRetries) {
+            const waitTime = attempt * 2000; // Progressive backoff
+            console.log(`Waiting ${waitTime}ms before retry...`);
+            await new Promise(resolve => setTimeout(resolve, waitTime));
+          }
+        }
       }
-
-      if (!response.data || !response.data.images || response.data.images.length === 0) {
-        return ImageGenerationResultSchema.parse({
-          status: 404,
-          error: 'No images were generated by the API'
-        });
-      }
-
-      return ImageGenerationResultSchema.parse({
-        status: response.status,
-        images: response.data.images,
-        parameters: mergedParams
+      
+      // If we reached here, all retries failed
+      console.error('All API request attempts failed');
+      return ImageGenerationResultSchema.parse(lastError || {
+        status: 500,
+        error: 'Unknown error after multiple retries'
       });
     } catch (error) {
       console.error('Error during image generation:', error);
