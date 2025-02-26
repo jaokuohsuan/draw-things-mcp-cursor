@@ -4,7 +4,7 @@ import { ImageGenerationParamsSchema, ImageGenerationResultSchema } from './sche
 
 class DrawThingsService {
   constructor() {
-    this.baseUrl = 'http://127.0.0.1:7888';
+    this.baseUrl = 'http://0.0.0.0:7888';
     this.axios = axios.create({
       baseURL: this.baseUrl,
       timeout: 600000, // 10 minutes timeout
