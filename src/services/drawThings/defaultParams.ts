@@ -1,5 +1,7 @@
-// This file is not needed in the JavaScript version, as we don't need type definitions
-export const defaultParams = {
+import { ImageGenerationParams } from './schemas.js';
+
+// Default parameters for image generation
+export const defaultParams: ImageGenerationParams = {
   speed_up_with_guidance_embed: true,
   motion_scale: 127,
   image_guidance: 1.5,
@@ -24,7 +26,7 @@ export const defaultParams = {
   diffusion_tile_width: 1024,
   diffusion_tile_overlap: 128,
   original_width: 512,
-  seed: 622911551,
+  seed: -1,
   zero_negative_prompt: false,
   upscaler_scale: 0,
   steps: 8,

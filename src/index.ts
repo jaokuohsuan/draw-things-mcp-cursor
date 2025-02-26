@@ -68,8 +68,11 @@ function markRequestAsProcessed(requestId: string): void {
   // Keep set size limited
   if (processedRequestIds.size > REQUEST_HISTORY_LIMIT) {
     // Remove oldest entry (first item in the set)
-    const oldestId = processedRequestIds.values().next().value;
-    processedRequestIds.delete(oldestId);
+    const iterator = processedRequestIds.values();
+    const firstItem = iterator.next();
+    if (firstItem.value) {
+      processedRequestIds.delete(firstItem.value);
+    }
   }
 }
 
@@ -109,8 +112,11 @@ function isPromptDuplicate(promptContent: string | undefined): boolean {
   // Keep map size limited
   if (processedPrompts.size > REQUEST_HISTORY_LIMIT) {
     // Remove oldest entry (first item in the map)
-    const oldestPrompt = processedPrompts.keys().next().value;
-    processedPrompts.delete(oldestPrompt);
+    const iterator = processedPrompts.keys();
+    const firstItem = iterator.next();
+    if (firstItem.value) {
+      processedPrompts.delete(firstItem.value);
+    }
   }
   
   return false;
@@ -256,7 +262,8 @@ function safeWrite(data: string): void {
     process.stdout.write(data + '\n');
   } catch (error) {
     // If we get EPIPE, the other end has closed the pipe
-    if (error instanceof Error && error.code === 'EPIPE') {
+    const err = error as any;
+    if (err instanceof Error && err.code === 'EPIPE') {
       log('Pipe has been closed, exiting gracefully');
       process.exit(0);
     } else {
@@ -704,7 +711,7 @@ async function main(): Promise<void> {
           };
           
           // Process the image generation request directly
-          handleImageGeneration(request.params?.parameters, request.id);
+          handleImageGeneration(request.params && request.params.parameters ? request.params.parameters : {}, request.id);
         } else {
           log('Unrecognized input format, cannot process');
           sendErrorResponse('Unrecognized input format', "parse_error", -32700);

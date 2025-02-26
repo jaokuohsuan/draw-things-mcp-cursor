@@ -25,6 +25,9 @@ export const ImageGenerationParamsSchema = z.object({
   // Other available parameters, but not strictly required
 }).passthrough(); // Allow other unknown parameters to pass through
 
+// Define the type from the schema
+export type ImageGenerationParams = z.infer<typeof ImageGenerationParamsSchema>;
+
 // Generation result structure definition
 export const ImageGenerationResultSchema = z.object({
   status: z.number(),
@@ -32,6 +35,8 @@ export const ImageGenerationResultSchema = z.object({
   parameters: z.record(z.any()).optional(),
   error: z.string().optional()
 });
+
+export type ImageGenerationResult = z.infer<typeof ImageGenerationResultSchema>;
 
 // Success response structure definition
 export const SuccessResponseSchema = z.object({
@@ -44,6 +49,8 @@ export const SuccessResponseSchema = z.object({
   )
 });
 
+export type SuccessResponse = z.infer<typeof SuccessResponseSchema>;
+
 // Error response structure definition
 export const ErrorResponseSchema = z.object({
   content: z.array(
@@ -55,8 +62,12 @@ export const ErrorResponseSchema = z.object({
   isError: z.literal(true)
 });
 
+export type ErrorResponse = z.infer<typeof ErrorResponseSchema>;
+
 // MCP response structure definition
 export const McpResponseSchema = z.union([
   SuccessResponseSchema,
   ErrorResponseSchema
-]); 
+]);
+
+export type McpResponse = z.infer<typeof McpResponseSchema>; 
