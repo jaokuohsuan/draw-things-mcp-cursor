@@ -282,14 +282,15 @@ server.tool(
 	"generateImage", 
 	"Generate an image using Draw Things API",
 	{
-		prompt: z.string().describe("The prompt to generate an image from"),
+		prompt: z.string().optional().describe("The prompt to generate an image from"),
 		negative_prompt: z.string().optional().describe("Negative prompt to guide what not to include"),
 		seed: z.number().optional().describe("Random seed for reproducibility"),
 		width: z.number().optional().describe("Width of the generated image"),
 		height: z.number().optional().describe("Height of the generated image"),
 		num_inference_steps: z.number().min(4).max(50).optional().describe("Number of inference steps"),
 		guidance_scale: z.number().optional().describe("Guidance scale for generation"),
-		model: z.string().optional().describe("Model to use for generation")
+		model: z.string().optional().describe("Model to use for generation"),
+		random_string: z.string().optional().describe("Dummy parameter for no-parameter tools")
 	},
 	async (params) => {
 		log('Received generateImage request with params:', params);

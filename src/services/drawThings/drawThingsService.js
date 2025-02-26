@@ -123,6 +123,11 @@ class DrawThingsService {
         if (Object.keys(params).length === 1 && params.random_string !== undefined) {
           console.log('Only random_string provided, using all default values');
           params = {}; // Clear params to use all defaults
+        } else if (params.random_string !== undefined) {
+          // If random_string is one of the parameters but not the only one, remove it before processing
+          const { random_string, ...cleanParams } = params;
+          params = cleanParams;
+          console.log('Removed random_string parameter, using remaining parameters');
         }
       }
 
