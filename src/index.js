@@ -37,23 +37,33 @@ log('Waiting for input...');
 function startApiProxyServer() {
 	// Create API proxy with enhanced configuration
 	const proxy = httpProxy.createProxyServer({
-		target: 'http://127.0.0.1:7888',
+		target: {
+			host: '127.0.0.1',
+			port: 7888,
+			protocol: 'http:'
+		},
 		changeOrigin: true,
 		ws: true,
 		xfwd: false,
 		secure: false,
 		// Enhanced headers for better connectivity
 		headers: {
-			"X-Forwarded-Host": "localhost",
+			"X-Forwarded-Host": "localhost:7888",
 			"X-Forwarded-Proto": "http",
 			"X-Forwarded-For": "127.0.0.1",
-			"Host": "localhost:7888",
-			"Origin": "http://localhost:7888",
-			"Connection": "keep-alive"
+			"Host": "127.0.0.1:7888",
+			"Origin": "http://127.0.0.1:7888",
+			"Connection": "keep-alive",
+			"Accept": "application/json",
+			"Content-Type": "application/json"
 		},
 		// Add proxy timeout settings
 		proxyTimeout: 120000,
-		timeout: 120000
+		timeout: 120000,
+		// Add additional options for stability
+		autoRewrite: true,
+		followRedirects: true,
+		selfHandleResponse: false
 	});
 	
 	// Create proxy server with enhanced error handling
@@ -256,9 +266,9 @@ function isPromptDuplicate(promptContent) {
 	const normalizedPrompt = promptContent.trim().toLowerCase();
 	const lastProcessed = processedPrompts.get(normalizedPrompt);
 	
-	// If prompt was processed less than 1 second ago, consider it duplicate
-	if (lastProcessed && (now - lastProcessed) < 1000) {
-		log(`Duplicate prompt detected within 1 second: "${normalizedPrompt.substring(0, 30)}..."`);
+	// Only consider it duplicate if processed in the last 100ms
+	if (lastProcessed && (now - lastProcessed) < 100) {
+		log(`Duplicate prompt detected within 100ms: "${normalizedPrompt.substring(0, 30)}..."`);
 		return true;
 	}
 	
@@ -348,6 +358,21 @@ function processRequest(request) {
 	log(`Processing request: ${JSON.stringify(request).substring(0, 100)}...`);
 	
 	try {
+		// For plain text input, create a proper request structure
+		if (typeof request === 'string') {
+			request = {
+				jsonrpc: "2.0",
+				id: Date.now().toString(),
+				method: "mcp.invoke",
+				params: {
+					tool: "generateImage",
+					parameters: {
+						prompt: request.trim()
+					}
+				}
+			};
+		}
+		
 		// Ensure request has the correct structure
 		if (!request.jsonrpc) request.jsonrpc = "2.0";
 		if (!request.id) request.id = Date.now().toString();
@@ -369,27 +394,15 @@ function processRequest(request) {
 				};
 			} else {
 				// No usable parameters found
-				log('No usable parameters found, using empty object');
-				request.params = {
-					tool: "generateImage",
-					parameters: {}
-				};
+				log('No usable parameters found in request');
+				return null;
 			}
-		} else if (!request.params.tool) {
-			// Ensure there's a tool parameter
-			request.params.tool = "generateImage";
 		}
 		
-		// Ensure there are parameters
-		if (!request.params.parameters) {
-			request.params.parameters = {};
-		}
-		
-		log(`Final request: ${JSON.stringify(request).substring(0, 150)}...`);
+		log(`Processed request: ${JSON.stringify(request).substring(0, 150)}...`);
 		return request;
 	} catch (error) {
 		log(`Error processing request: ${error.message}`);
-		sendErrorResponse(`Error processing request: ${error.message}`, "internal_error", -32603);
 		return null;
 	}
 }
