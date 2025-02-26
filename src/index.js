@@ -1,16 +1,6 @@
 #!/usr/bin/env node
 
 /**
- * Welcome to Cloudflare Workers! This is your first worker.
- *
- * - Run `npm run dev` in your terminal to start a development server
- * - Open a browser tab at http://localhost:8787/ to see your worker in action
- * - Run `npm run deploy` to publish your worker
- *
- * Learn more at https://developers.cloudflare.com/workers/
- */
-
-/**
  * Draw Things MCP - A Model Context Protocol implementation for Draw Things API
  * Integrated with Cursor MCP Bridge functionality for multiple input formats
  */
@@ -24,6 +14,8 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import readline from 'readline';
 import { z } from 'zod';
+import http from 'http';
+import httpProxy from 'http-proxy';
 
 // Get current directory path
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -40,6 +32,128 @@ function log(message) {
 // Initialize log
 log('Draw Things MCP Service started');
 log('Waiting for input...');
+
+// Setup API proxy server to overcome local connection restrictions
+function startApiProxyServer() {
+	// Create API proxy with enhanced configuration
+	const proxy = httpProxy.createProxyServer({
+		target: 'http://127.0.0.1:7888',
+		changeOrigin: true,
+		ws: true,
+		xfwd: false,
+		secure: false,
+		// Enhanced headers for better connectivity
+		headers: {
+			"X-Forwarded-Host": "localhost",
+			"X-Forwarded-Proto": "http",
+			"X-Forwarded-For": "127.0.0.1",
+			"Host": "localhost:7888",
+			"Origin": "http://localhost:7888",
+			"Connection": "keep-alive"
+		},
+		// Add proxy timeout settings
+		proxyTimeout: 120000,
+		timeout: 120000
+	});
+	
+	// Create proxy server with enhanced error handling
+	const proxyPort = process.env.PROXY_PORT || 7889;
+	const maxRetries = 3;
+	
+	const proxyServer = http.createServer(async (req, res) => {
+		// Log request for debugging
+		log(`Proxy received request: ${req.method} ${req.url}`);
+		
+		// Enhanced CORS headers
+		res.setHeader('Access-Control-Allow-Origin', '*');
+		res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, PATCH, DELETE');
+		res.setHeader('Access-Control-Allow-Headers', 'X-Requested-With,content-type,Authorization');
+		res.setHeader('Access-Control-Allow-Credentials', true);
+		
+		// Handle preflight requests
+		if (req.method === 'OPTIONS') {
+			res.writeHead(200);
+			res.end();
+			return;
+		}
+		
+		// Add retry mechanism for failed requests
+		const handleRequest = async (retryAttempt = 0) => {
+			try {
+				// Add custom headers for better connectivity
+				req.headers['accept'] = 'application/json';
+				req.headers['content-type'] = 'application/json';
+				if (!req.headers['x-requested-with']) {
+					req.headers['x-requested-with'] = 'XMLHttpRequest';
+				}
+				
+				// Route request through proxy with promise wrapper
+				await new Promise((resolve, reject) => {
+					proxy.web(req, res, {}, (err) => {
+						if (err) {
+							reject(err);
+						} else {
+							resolve();
+						}
+					});
+				});
+			} catch (err) {
+				if (retryAttempt < maxRetries) {
+					log(`Retry attempt ${retryAttempt + 1} of ${maxRetries}`);
+					await new Promise(resolve => setTimeout(resolve, 1000 * (retryAttempt + 1)));
+					return handleRequest(retryAttempt + 1);
+				}
+				log(`Proxy error after ${maxRetries} retries: ${err.message}`);
+				if (!res.headersSent) {
+					res.writeHead(502);
+					res.end(`Proxy error: ${err.message}`);
+				}
+			}
+		};
+		
+		await handleRequest(0);
+	});
+	
+	// Enhanced error handling for proxy
+	proxy.on('error', (err, req, res) => {
+		log(`Proxy error: ${err.message}`);
+		if (res && !res.headersSent) {
+			res.writeHead(502);
+			res.end(`Proxy error: ${err.message}`);
+		}
+	});
+	
+	// Enhanced error handling for proxy server
+	proxyServer.on('error', (err) => {
+		log(`Proxy server error: ${err.message}`);
+		if (err.code === 'EADDRINUSE') {
+			log(`Port ${proxyPort} is in use, trying to close existing connection...`);
+			setTimeout(() => {
+				proxyServer.close();
+				proxyServer.listen(proxyPort);
+			}, 1000);
+		}
+	});
+	
+	// Start server with connection monitoring
+	proxyServer.listen(proxyPort, () => {
+		log(`API proxy server running on http://localhost:${proxyPort}`);
+		log(`Proxying requests to http://127.0.0.1:7888`);
+		
+		// Update DrawThingsService baseUrl to use proxy
+		drawThingsService.baseUrl = `http://localhost:${proxyPort}`;
+		drawThingsService.axios.defaults.baseURL = drawThingsService.baseUrl;
+		log(`Updated Draw Things Service to use proxy URL: ${drawThingsService.baseUrl}`);
+		
+		// Monitor proxy server status
+		setInterval(() => {
+			const activeConnections = proxyServer._connections;
+			log(`Active proxy connections: ${activeConnections}`);
+		}, 30000);
+	});
+	
+	return proxyServer;
+}
 
 // Helper function to save images to the file system
 async function saveImage(base64Data, outputPath) {
@@ -69,7 +183,7 @@ async function saveImage(base64Data, outputPath) {
 const server = new McpServer({
 	name: 'draw-things-mcp',
 	version: '1.3.0',
-	description: 'Draw Things MCP Server with integrated input format handling'
+	description: 'Draw Things MCP Server for generating images via Draw Things API'
 });
 
 // Create service instance
@@ -140,8 +254,11 @@ function isPromptDuplicate(promptContent) {
 	
 	// Check if this prompt was recently processed
 	const normalizedPrompt = promptContent.trim().toLowerCase();
-	if (processedPrompts.has(normalizedPrompt)) {
-		log(`Duplicate prompt detected: "${normalizedPrompt.substring(0, 30)}..."`);
+	const lastProcessed = processedPrompts.get(normalizedPrompt);
+	
+	// If prompt was processed less than 1 second ago, consider it duplicate
+	if (lastProcessed && (now - lastProcessed) < 1000) {
+		log(`Duplicate prompt detected within 1 second: "${normalizedPrompt.substring(0, 30)}..."`);
 		return true;
 	}
 	
@@ -453,7 +570,26 @@ async function handleImageGeneration(parameters, requestId) {
 async function main() {
 	try {
 		log('Starting Draw Things MCP service...');
+		
+		// Print connection info to the console
+		printConnectionInfo();
+		
 		log('Initializing Draw Things MCP service');
+		
+		// Pre-check API connection
+		log('Checking Draw Things API connection before starting service...');
+		const isApiConnected = await drawThingsService.checkApiConnection();
+		if (!isApiConnected) {
+			console.error('\nFAILED TO CONNECT TO DRAW THINGS API');
+			console.error('Please make sure Draw Things is running and the API is enabled.');
+			console.error('The service will continue running, but image generation will not work until the API is available.\n');
+			
+			// Still continue - the service should auto-retry on each request
+			log('Continuing despite connection failure - will retry on each request');
+		} else {
+			console.error('\nSUCCESSFULLY CONNECTED TO DRAW THINGS API');
+			console.error('The service is ready to generate images.\n');
+		}
 		
 		const transport = new StdioServerTransport();
 		
@@ -671,3 +807,18 @@ main().catch(async (error) => {
 	await logError(error);
 	process.exit(1);
 });
+
+// Print connection information and help message on startup
+function printConnectionInfo() {
+	console.error('\n---------------------------------------------');
+	console.error('| Draw Things MCP - Image Generation Service |');
+	console.error('---------------------------------------------\n');
+	console.error('Attempting to connect to Draw Things API at:');
+	console.error('    http://127.0.0.1:7888\n');
+	console.error('TROUBLESHOOTING TIPS:');
+	console.error('1. Ensure Draw Things is running on your computer');
+	console.error('2. Make sure the API is enabled in Draw Things settings');
+	console.error('3. If you changed the default port in Draw Things, set the environment variable:');
+	console.error('   DRAW_THINGS_API_URL=http://127.0.0.1:YOUR_PORT \n');
+	console.error('Starting service...\n');
+}
