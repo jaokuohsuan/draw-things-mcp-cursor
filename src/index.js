@@ -22,6 +22,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Set up log file
 const logFile = 'draw-things-mcp.log';
+// Add debug mode flag
+const DEBUG_MODE = process.env.DEBUG_MODE === 'true';
+
 function log(message) {
 	const timestamp = new Date().toISOString();
 	const logMessage = `${timestamp} - ${message}\n`;
@@ -277,11 +280,15 @@ function isPromptDuplicate(promptContent) {
 	
 	// Check if this prompt was recently processed
 	const normalizedPrompt = promptContent.trim().toLowerCase();
-	const lastProcessed = processedPrompts.get(normalizedPrompt);
 	
-	// Only consider it duplicate if processed in the last 100ms
-	if (lastProcessed && (now - lastProcessed) < 100) {
-		log(`Duplicate prompt detected within 100ms: "${normalizedPrompt.substring(0, 30)}..."`);
+	// Only consider it duplicate if processed in the last 2000ms (increased from 100ms)
+	// This prevents legitimate repeated requests from being blocked
+	const lastProcessed = processedPrompts.get(normalizedPrompt);
+	if (lastProcessed && (now - lastProcessed) < 2000) {
+		// Don't log duplicates when they're expected
+		if (now - lastProcessed > 500) {
+			log(`Duplicate prompt detected within 2 seconds: "${normalizedPrompt.substring(0, 30)}..."`);
+		}
 		return true;
 	}
 	
@@ -485,126 +492,180 @@ server.tool(
 	}
 );
 
-// Enhanced error logging function
+// Enhanced error logging to dedicated error log file
 async function logError(error) {
 	try {
-		const timestamp = new Date().toISOString();
-		const errorDetails = error.stack || error.message || String(error);
-		const errorMessage = `${timestamp} - [ERROR] ${errorDetails}\n`;
-		
-		// Ensure log directory exists
-		const errorLogFile = 'logs/error.log';
-		const errorLogDir = path.dirname(errorLogFile);
-		
-		if (!fs.existsSync(errorLogDir)) {
-			fs.mkdirSync(errorLogDir, { recursive: true });
+		// Ensure logs directory exists
+		const logsDir = path.join(process.cwd(), 'logs');
+		if (!fs.existsSync(logsDir)) {
+			try {
+				fs.mkdirSync(logsDir, { recursive: true });
+				log(`Created logs directory: ${logsDir}`);
+			} catch (mkdirError) {
+				console.error(`Failed to create logs directory: ${mkdirError.message}`);
+				// Continue anyway - we'll try to write to the file and handle any errors
+			}
 		}
 		
-		// Append to error log file
-		await fs.promises.appendFile(errorLogFile, errorMessage);
+		const errorLogFile = path.join(logsDir, 'error.log');
+		const timestamp = new Date().toISOString();
+		const errorDetails = error instanceof Error ? 
+			`${error.message}\n${error.stack}` : 
+			String(error);
 		
-		// Also add to main log
-		log(`Logged error to ${errorLogFile}: ${error.message || String(error)}`);
+		const errorLog = `${timestamp} - ERROR: ${errorDetails}\n\n`;
+		
+		// Use async file writing with fallback
+		try {
+			await fs.promises.appendFile(errorLogFile, errorLog);
+			
+			// Also log to main log file
+			log(`Error logged to ${errorLogFile}`);
+			
+			if (DEBUG_MODE) {
+				// In debug mode, also output full error details to console
+				console.error(`\n[DEBUG] FULL ERROR DETAILS:\n${errorDetails}\n`);
+			}
+		} catch (writeError) {
+			// Fallback to sync writing
+			try {
+				fs.appendFileSync(errorLogFile, errorLog);
+			} catch (syncWriteError) {
+				// Last resort - log to console
+				console.error(`Failed to write to error log: ${syncWriteError.message}`);
+				console.error(`Original error: ${errorDetails}`);
+			}
+		}
 	} catch (logError) {
-		console.error('Failed to write error log:', logError);
-		// Still try to log to console
+		// If all else fails, at least log to console
+		console.error('Critical error in error logging system:');
+		console.error(logError);
+		console.error('Original error:');
 		console.error(error);
 	}
 }
 
-// Handle image generation request
-async function handleImageGeneration(parameters, requestId) {
+// Function to always send proper JSON-RPC 2.0 formatted responses
+function sendJsonRpcResponse(id, result, isError = false) {
 	try {
-		// Check if this request has already been processed
-		if (hasRequestBeenProcessed(requestId)) {
-			log(`Request ${requestId} has already been processed, skipping`);
-			return;
+		const response = {
+			jsonrpc: "2.0",
+			id: id,
+			result: result
+		};
+		
+		// Ensure we're sending a valid JSON string followed by newline
+		log(`Sending JSON-RPC response for id: ${id}, isError: ${isError}`);
+		safeWrite(JSON.stringify(response));
+	} catch (error) {
+		log(`Error creating JSON-RPC response: ${error.message}`);
+		
+		// Fallback to a simpler response format
+		try {
+			const fallbackResponse = {
+				jsonrpc: "2.0",
+				id: id,
+				result: {
+					content: [{
+						type: 'text',
+						text: isError 
+							? `Error generating image: ${error.message}`
+							: 'Image generation completed, but there was an error creating the response'
+					}],
+					isError: isError
+				}
+			};
+			safeWrite(JSON.stringify(fallbackResponse));
+		} catch (secondError) {
+			log(`Critical error sending response: ${secondError.message}`);
+		}
+	}
+}
+
+// Process plain text input from MCP Bridge
+async function handleImageGeneration(parameters, requestId) {
+	if (hasRequestBeenProcessed(requestId)) {
+		log(`Duplicate request ID detected and skipped: ${requestId}`);
+		return;
+	}
+
+	// Process only once per request ID
+	markRequestAsProcessed(requestId);
+	
+	// Set processing flag to prevent early exit
+	isProcessing = true;
+	
+	try {
+		log(`Handling image generation request ID: ${requestId}`);
+		
+		// Ensure we have a prompt
+		const userParams = parameters || {};
+		
+		// Extract prompt if it's the only parameter (for random_string from Cursor)
+		if (userParams.random_string && Object.keys(userParams).length === 1) {
+			userParams.prompt = userParams.random_string;
+			delete userParams.random_string;
 		}
 		
-		// Check for duplicate prompt content
-		if (parameters && parameters.prompt && isPromptDuplicate(parameters.prompt)) {
+		// Check prompt for duplication only for similar prompts
+		// Skip duplication check if this is a retry or has additional parameters
+		if (Object.keys(userParams).length <= 1 && 
+			isPromptDuplicate(userParams.prompt) && 
+			!requestId.includes('retry')) {
 			log(`Duplicate prompt detected for request ${requestId}, skipping`);
-			return;
+			return sendJsonRpcResponse(requestId, createErrorResponse('Duplicate request detected and skipped'));
 		}
 		
-		// Mark as processed
-		markRequestAsProcessed(requestId);
+		log(`Generating image for prompt: ${JSON.stringify(userParams).substring(0, 100)}...`);
 		
-		// Call image generation service
-		const result = await drawThingsService.generateImage(parameters || {});
+		// Generate image with retry logic
+		const result = await drawThingsService.generateImage(userParams);
 		
-		if (result.status >= 400 || result.error) {
-			// Return error response
-			const errorMessage = result.error || 'Failed to generate image';
-			const response = {
-				jsonrpc: '2.0',
-				id: requestId,
-				result: createErrorResponse(errorMessage)
-			};
-			safeWrite(JSON.stringify(response));
+		// Handle generation result
+		if (result.isError) {
+			log(`Error generating image: ${result.errorMessage}`);
+			return sendJsonRpcResponse(requestId, createErrorResponse(result.errorMessage), true);
+		}
+		
+		if (!result.imageData) {
+			log('No image data returned from generation');
+			return sendJsonRpcResponse(requestId, createErrorResponse('No image data returned from generation'), true);
+		}
+		
+		// Save image to file system
+		try {
+			const timestamp = new Date().toISOString().replace(/:/g, '-');
+			const prompt = userParams.prompt || 'generated-image';
+			const safePrompt = prompt.substring(0, 30).replace(/[^a-zA-Z0-9]/g, '_');
+			const imagePath = path.join('images', `${safePrompt}_${timestamp}.png`);
 			
-			// Signal that the request is complete with error
-			processComplete(false);
-		} else if (result.images && result.images.length > 0) {
 			// Save image to file system
-			try {
-				const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-				const prompt = parameters?.prompt || 'image';
-				const filename = `${prompt.replace(/[^a-z0-9]/gi, '_').substring(0, 30)}_${timestamp}.png`;
-				const outputPath = path.join('images', filename);
-				await saveImage(result.images[0], outputPath);
-				log(`Successfully saved image to file system: ${outputPath}`);
-				
-				// Ensure image is saved before returning response
-				const response = {
-					jsonrpc: '2.0',
-					id: requestId,
-					result: createImageResponse(result.images[0])
-				};
-				log('Preparing to return MCP response with image data');
-				safeWrite(JSON.stringify(response));
-				log('MCP response sent');
-				
-				// Signal that the request is complete successfully
-				processComplete(true);
-			} catch (saveError) {
-				log(`Error saving image: ${saveError.message}`);
-				
-				// Return image response even if saving fails
-				const response = {
-					jsonrpc: '2.0',
-					id: requestId,
-					result: createImageResponse(result.images[0])
-				};
-				safeWrite(JSON.stringify(response));
-				
-				// Signal that the request is complete with partial success
-				processComplete(true);
-			}
-		} else {
-			// No images
-			const response = {
-				jsonrpc: '2.0',
-				id: requestId,
-				result: createErrorResponse('No images were generated')
-			};
-			safeWrite(JSON.stringify(response));
+			await saveImage(result.imageData, imagePath);
+			log(`Successfully saved image to file system: ${imagePath}`);
 			
-			// Signal that the request is complete with error
-			processComplete(false);
+			// Return response with image data
+			log('Preparing to return MCP response with image data');
+			const imageResponse = createImageResponse(result.imageData);
+			
+			// Add file path to response
+			imageResponse.imageSavedPath = imagePath;
+			
+			// Send JSON-RPC 2.0 formatted response
+			sendJsonRpcResponse(requestId, imageResponse);
+			log('MCP response sent');
+		} catch (saveError) {
+			log(`Error saving image: ${saveError.message}`);
+			return sendJsonRpcResponse(requestId, createErrorResponse(`Failed to save image: ${saveError.message}`), true);
 		}
 	} catch (error) {
-		// Handle error
-		log(`[ERROR] Error processing generateImage request: ${error.message}`);
-		const response = {
-			jsonrpc: '2.0',
-			id: requestId,
-			result: createErrorResponse(`Internal error: ${error.message}`)
-		};
-		safeWrite(JSON.stringify(response));
+		log(`Error handling image generation: ${error.message}`);
+		await logError(error);
 		
-		// Signal that the request is complete with error
-		processComplete(false);
+		// Send error response in JSON-RPC 2.0 format
+		sendJsonRpcResponse(requestId, createErrorResponse(`Internal error: ${error.message}`), true);
+	} finally {
+		// Signal that the request is complete
+		processComplete(true);
 	}
 }
 
@@ -622,11 +683,117 @@ async function main() {
 		log('Starting API proxy server...');
 		const proxyServer = startApiProxyServer();
 		
-		// Give proxy time to initialize
-		await new Promise(resolve => setTimeout(resolve, 1000));
-		
-		// Pre-check API connection
+		// Enhanced API connection verification with multiple methods
 		log('Checking Draw Things API connection before starting service...');
+		const apiPort = process.env.DRAW_THINGS_API_PORT || 7888;
+		const apiProxyPort = process.env.PROXY_PORT || 7889;
+		
+		// Verify direct connection first
+		log(`Checking direct connection to API on port ${apiPort}...`);
+		const directApiCheck = async () => {
+			try {
+				const options = {
+					host: '127.0.0.1',
+					port: apiPort,
+					path: '/sdapi/v1/options',
+					method: 'GET',
+					timeout: 5000,
+					headers: {
+						'User-Agent': 'DrawThingsMCP/1.0',
+						'Accept': 'application/json'
+					}
+				};
+
+				return new Promise((resolve) => {
+					const req = http.request(options, (res) => {
+						log(`Direct API connection response: ${res.statusCode}`);
+						resolve(res.statusCode >= 200 && res.statusCode < 300);
+					});
+
+					req.on('error', (e) => {
+						log(`Direct API connection error: ${e.message}`);
+						resolve(false);
+					});
+
+					req.on('timeout', () => {
+						log('Direct API connection timeout');
+						req.destroy();
+						resolve(false);
+					});
+
+					req.end();
+				});
+			} catch (error) {
+				log(`Error during direct API check: ${error.message}`);
+				return false;
+			}
+		};
+
+		// Verify proxy connection
+		log(`Checking proxy connection to API on port ${apiProxyPort}...`);
+		const proxyApiCheck = async () => {
+			try {
+				const options = {
+					host: 'localhost',
+					port: apiProxyPort,
+					path: '/sdapi/v1/options',
+					method: 'GET',
+					timeout: 5000,
+					headers: {
+						'User-Agent': 'DrawThingsMCP/1.0',
+						'Accept': 'application/json'
+					}
+				};
+
+				return new Promise((resolve) => {
+					const req = http.request(options, (res) => {
+						log(`Proxy API connection response: ${res.statusCode}`);
+						resolve(res.statusCode >= 200 && res.statusCode < 300);
+					});
+
+					req.on('error', (e) => {
+						log(`Proxy API connection error: ${e.message}`);
+						resolve(false);
+					});
+
+					req.on('timeout', () => {
+						log('Proxy API connection timeout');
+						req.destroy();
+						resolve(false);
+					});
+
+					req.end();
+				});
+			} catch (error) {
+				log(`Error during proxy API check: ${error.message}`);
+				return false;
+			}
+		};
+
+		// Try both connection methods
+		const directConnectionOk = await directApiCheck();
+		log(`Direct API connection result: ${directConnectionOk ? 'SUCCESS' : 'FAILED'}`);
+
+		// Wait a moment for the proxy to initialize
+		await new Promise(resolve => setTimeout(resolve, 2000));
+
+		const proxyConnectionOk = await proxyApiCheck();
+		log(`Proxy API connection result: ${proxyConnectionOk ? 'SUCCESS' : 'FAILED'}`);
+
+		// Set preferred connection method
+		if (directConnectionOk) {
+			log('Using direct connection to Draw Things API');
+			drawThingsService.baseUrl = `http://127.0.0.1:${apiPort}`;
+			drawThingsService.axios.defaults.baseURL = drawThingsService.baseUrl;
+		} else if (proxyConnectionOk) {
+			log('Using proxy connection to Draw Things API');
+			drawThingsService.baseUrl = `http://localhost:${apiProxyPort}`;
+			drawThingsService.axios.defaults.baseURL = drawThingsService.baseUrl;
+		} else {
+			log('Neither direct nor proxy connection could be established');
+		}
+
+		// Final drawThingsService connection check
 		const isApiConnected = await drawThingsService.checkApiConnection();
 		if (!isApiConnected) {
 			console.error('\nFAILED TO CONNECT TO DRAW THINGS API');
@@ -639,7 +806,7 @@ async function main() {
 			console.error('\nSUCCESSFULLY CONNECTED TO DRAW THINGS API');
 			console.error('The service is ready to generate images.\n');
 		}
-		
+
 		const transport = new StdioServerTransport();
 		
 		// Handle SIGINT signal (Ctrl+C)

@@ -177,3 +177,5 @@ test-output
 cursor-mcp-bridge.log
 cursor-mcp-bridge.log.old
 draw-things-mcp.log
+draw-things-mcp.log.old
+*.log
