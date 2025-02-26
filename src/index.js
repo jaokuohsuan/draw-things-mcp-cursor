@@ -100,7 +100,7 @@ function createImageResponse(imageData) {
 // Used to track whether we have an active request
 let isProcessing = false;
 let exitDelayTimer = null;
-const EXIT_DELAY_MS = 3000; // 3 seconds waiting time after successful completion
+const EXIT_DELAY_MS = 300000; // 5 minutes waiting time after successful completion
 let isPipeMode = false; // Flag to indicate if running in pipe mode
 
 // Track processed request IDs to avoid duplicate processing
