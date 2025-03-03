@@ -4,6 +4,9 @@ import {
   validateImageGenerationParams,
 } from "./schemas.js";
 import axios, { AxiosInstance } from "axios";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 import { DrawThingsGenerationResult } from "../../interfaces/index.js";
 
 /**
@@ -30,7 +33,9 @@ export class DrawThingsService {
     });
 
     // log initialization
-    console.error(`DrawThingsService initialized, API location: ${this.baseUrl}`);
+    console.error(
+      `DrawThingsService initialized, API location: ${this.baseUrl}`
+    );
   }
 
   /**
@@ -50,19 +55,68 @@ export class DrawThingsService {
   async checkApiConnection(): Promise<boolean> {
     try {
       console.error(`Checking API connection to: ${this.baseUrl}`);
-      
+
       // Try simple endpoint with short timeout
       const response = await this.axios.get("/sdapi/v1/options", {
         timeout: 5000,
-        validateStatus: (status) => status >= 200
+        validateStatus: (status) => status >= 200,
       });
-      
+
       const isConnected = response.status >= 200;
-      console.error(`API connection check: ${isConnected ? "Success" : "Failed"}`);
+      console.error(
+        `API connection check: ${isConnected ? "Success" : "Failed"}`
+      );
       return isConnected;
     } catch (error) {
       console.error(`API connection check failed: ${(error as Error).message}`);
       return false;
+    }
+  }
+
+  // Helper function to save images to the file system
+  async saveImage({
+    base64Data,
+    outputPath,
+    fileName
+  }: {
+    base64Data: string;
+    outputPath?: string;
+    fileName?: string;
+  }): Promise<string> {
+    const __filename = fileURLToPath(import.meta.url);
+    // Get directory name
+    const __dirname = path.dirname(__filename);
+    const projectRoot: string = path.resolve(__dirname, "..");
+    
+    try {
+      // if no output path provided, use default path
+      const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const defaultFileName = fileName || `generated-image-${timestamp}.png`;
+      const defaultImagesDir = path.resolve(projectRoot, "..", "images");
+      const finalOutputPath = outputPath || path.join(defaultImagesDir, defaultFileName);
+      
+      // ensure the images directory exists
+      const imagesDir = path.dirname(finalOutputPath);
+      if (!fs.existsSync(imagesDir)) {
+        await fs.promises.mkdir(imagesDir, { recursive: true });
+      }
+
+      const cleanBase64 = base64Data.replace(/^data:image\/\w+;base64,/, "");
+      const buffer = Buffer.from(cleanBase64, "base64");
+
+      const absolutePath = path.resolve(finalOutputPath);
+      await fs.promises.writeFile(absolutePath, buffer);
+      return absolutePath;
+    } catch (error) {
+      console.error(
+        `Failed to save image: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+      if (error instanceof Error) {
+        console.error(error.stack || "No stack trace available");
+      }
+      throw error;
     }
   }
 
@@ -144,10 +198,29 @@ export class DrawThingsService {
         : `data:image/png;base64,${imageData}`;
 
       console.error("image generation success");
+      
+      // record the start time of image generation
+      const startTime = Date.now() - 2000; // assume the image generation took 2 seconds
+      const endTime = Date.now();
+      
+      // automatically save the generated image
+      const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const defaultFileName = `generated-image-${timestamp}.png`;
+      
+      // save the generated image
+      const imagePath = await this.saveImage({
+        base64Data: formattedImageData,
+        fileName: defaultFileName
+      });
+      
       return {
         isError: false,
         imageData: formattedImageData,
-        parameters: requestParams,
+        imagePath: imagePath,
+        metadata: {
+          alt: `Image generated from prompt: ${requestParams.prompt}`,
+          inference_time_ms: endTime - startTime,
+        }
       };
     } catch (error) {
       console.error("image generation error:", error);

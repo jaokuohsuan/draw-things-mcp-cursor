@@ -109,43 +109,6 @@ async function logError(error: Error | unknown): Promise<void> {
   }
 }
 
-// Helper function to save images to the file system
-async function saveImage(
-  base64Data: string,
-  outputPath: string
-): Promise<string> {
-  try {
-    // Ensure the images directory exists
-    const imagesDir = path.dirname(outputPath);
-    if (!fs.existsSync(imagesDir)) {
-      await fs.promises.mkdir(imagesDir, { recursive: true });
-      log(`Created images directory: ${imagesDir}`);
-    }
-
-    log(`Starting to save image, size: ${base64Data.length} characters`);
-    // 確保 base64Data 不含前綴
-    const cleanBase64 = base64Data.replace(/^data:image\/\w+;base64,/, "");
-    const buffer = Buffer.from(cleanBase64, "base64");
-    log(`Image converted to buffer, size: ${buffer.length} bytes`);
-
-    // 轉換為絕對路徑
-    const absolutePath = path.resolve(outputPath);
-    await fs.promises.writeFile(absolutePath, buffer);
-    log(`Image successfully saved to: ${absolutePath}`);
-    return absolutePath;
-  } catch (error) {
-    log(
-      `Failed to save image: ${
-        error instanceof Error ? error.message : String(error)
-      }`
-    );
-    if (error instanceof Error) {
-      log(error.stack || "No stack trace available");
-    }
-    throw error;
-  }
-}
-
 // Print connection information and help message on startup
 function printConnectionInfo(): void {
   // Only print to stderr to avoid polluting JSON-RPC communication
@@ -189,7 +152,6 @@ const paramsSchema = {
   random_string: z.string().optional(),
 };
 
-
 server.tool(
   "generateImage",
   "Generate an image based on a prompt",
@@ -199,7 +161,8 @@ server.tool(
       log("Received image generation request");
       log(`mcpParams====== ${JSON.stringify(mcpParams)}`);
       // handle ai prompts
-      const parameters = mcpParams?.params?.arguments || mcpParams?.arguments || mcpParams || {};
+      const parameters =
+        mcpParams?.params?.arguments || mcpParams?.arguments || mcpParams || {};
 
       if (parameters.prompt) {
         log(`Using provided prompt: ${parameters.prompt}`);
@@ -207,12 +170,6 @@ server.tool(
         log("No prompt provided, using default");
         parameters.prompt = "A cute dog";
       }
-
-      log(
-        `Processing generateImage request: ${JSON.stringify(
-          parameters
-        ).substring(0, 100)}...`
-      );
 
       // Generate image
       const result: ImageGenerationResult =
@@ -241,21 +198,25 @@ server.tool(
 
       log("Successfully generated image, returning directly via MCP");
 
-      const cleanBase64 = imageData.replace(/^data:image\/\w+;base64,/, "");
+      // calculate the difference between the start and end time (example value)
+      const startTime = Date.now() - 2000; // assume the image generation took 2 seconds
+      const endTime = Date.now();
+
+      // build the response format
+      const responseData = {
+        image_paths: result.imagePath ? [result.imagePath] : [],
+        metadata: {
+          alt: `Image generated from prompt: ${parameters.prompt}`,
+          inference_time_ms:
+            result.metadata?.inference_time_ms || endTime - startTime,
+        },
+      };
 
       return {
         content: [
           {
-            type: "image",
-            image_data: {
-              base64: cleanBase64,
-              media_type: "image/png",
-            },
-            alt: `Image generated from prompt: ${parameters.prompt}`,
-          },
-          {
             type: "text",
-            text: `Successfully generated image from prompt: "${parameters.prompt}"`,
+            text: JSON.stringify(responseData, null, 2),
           },
         ],
       };

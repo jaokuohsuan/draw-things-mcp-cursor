@@ -1,9 +1,9 @@
 /**
- * 圖像生成相關的介面定義
+ * images generation interfaces
  */
 
 /**
- * 圖像回應格式
+ * image response format
  */
 export interface ImageResponse {
   content: Array<{
@@ -16,11 +16,11 @@ export interface ImageResponse {
     height: number;
     meta: Record<string, any>;
   }>;
-  imageSavedPath?: string; // 可選屬性，用於儲存圖像的檔案路徑
+  imageSavedPath?: string; // optional property, for storing image file path
 }
 
 /**
- * 圖像生成參數
+ * image generation parameters
  */
 export interface ImageGenerationParameters {
   prompt?: string;
@@ -36,10 +36,10 @@ export interface ImageGenerationParameters {
 }
 
 /**
- * 圖像生成結果
+ * image generation result
  */
 export interface ImageGenerationResult {
-  status?: number;  // 改為可選
+  status?: number;  // changed to optional
   error?: string;
   images?: string[];
   imageData?: string;
@@ -48,14 +48,19 @@ export interface ImageGenerationResult {
 }
 
 /**
- * Draw Things 服務的生成結果
+ * Draw Things service generation result
  */
 export interface DrawThingsGenerationResult {
   isError: boolean;
   imageData?: string;
   errorMessage?: string;
   parameters?: Record<string, any>;
-  status?: number; // 新增屬性以相容 ImageGenerationResult
-  images?: string[]; // 新增屬性以相容 ImageGenerationResult
-  error?: string;    // 新增屬性以相容 ImageGenerationResult
+  status?: number; // added property to compatible with ImageGenerationResult
+  images?: string[]; // added property to compatible with ImageGenerationResult
+  error?: string;    // added property to compatible with ImageGenerationResult
+  imagePath?: string; // added property to store the path of the generated image
+  metadata?: {
+    alt: string;
+    inference_time_ms: number;
+  }; // added metadata
 } 
