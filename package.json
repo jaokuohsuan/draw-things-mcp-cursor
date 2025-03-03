@@ -26,10 +26,17 @@
 		"@swc/cli": "^0.3.8",
 		"@swc/core": "^1.4.8",
 		"@swc/helpers": "^0.5.6",
-		"@types/node": "^20.12.8",
+		"@types/node": "^20.17.19",
 		"rimraf": "^5.0.10",
 		"ts-node": "^10.9.2",
-		"typescript": "^5.3.3"
+		"typescript": "^5.3.3",
+		"zod-to-json-schema": "3.20.3"
+	},
+	"overrides": {
+		"zod-to-json-schema": "3.20.3"
+	},
+	"resolutions": {
+		"zod-to-json-schema": "3.20.3"
 	},
 	"files": [
 		"dist",
@@ -56,5 +63,6 @@
 	"homepage": "https://github.com/james-jao/draw-things-mcp#readme",
 	"engines": {
 		"node": ">=16.0.0"
-	}
+	},
+	"packageManager": "pnpm@9.14.4+sha512.c8180b3fbe4e4bca02c94234717896b5529740a6cbadf19fa78254270403ea2f27d4e1d46a08a0f56c89b63dc8ebfd3ee53326da720273794e6200fcf0d184ab"
 }

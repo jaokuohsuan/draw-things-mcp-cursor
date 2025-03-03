@@ -1,8 +1,8 @@
 {
   "compilerOptions": {
     "target": "ES2018",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
     "esModuleInterop": true,
     "allowSyntheticDefaultImports": true,
     "strict": true,
@@ -14,7 +14,13 @@
     "declaration": true,
     "resolveJsonModule": true,
     "lib": ["ES2018"],
-    "types": ["node"]
+    "types": ["node", "jsdom"],
+    "moduleSuffixes": ["js", "ts"],
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"]
+    }
+
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist"]
