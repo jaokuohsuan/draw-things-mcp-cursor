@@ -19,7 +19,10 @@
     "baseUrl": ".",
     "paths": {
       "@/*": ["src/*"]
-    }
+    },
+    "preserveSymlinks": true,
+    "allowJs": true,
+    "removeComments": true
 
   },
   "include": ["src/**/*"],
